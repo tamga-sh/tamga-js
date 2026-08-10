@@ -98,4 +98,54 @@ describe("offline proof payload field order — alphabetical, not source order",
     const result = await verifyOfflineProof(proof, accountId, machineId, fingerprint, dataset, spki);
     expect(result).toBe(false);
   });
+
+  it("preserves a caller-supplied dataset key literally named __proto__ instead of silently dropping it", () => {
+    // Regression test: a plain `{}` accumulator in canonicalize() would
+    // route `result["__proto__"] = value` through Object.prototype's
+    // legacy __proto__ setter instead of creating an own property,
+    // silently vanishing the key/value from the JSON output entirely.
+    // `JSON.parse` legitimately produces such an own property (per spec,
+    // it bypasses the setter on the *source* side), so a dataset like
+    // `JSON.parse('{"cores":4,"__proto__":{"evil":true}}')` is a realistic
+    // input, not a contrived one.
+    const dataset = JSON.parse('{"cores":4,"__proto__":{"evil":true}}') as Record<string, unknown>;
+    expect(Object.keys(dataset)).toEqual(["cores", "__proto__"]);
+
+    const json = canonicalJsonStringify({
+      account: { id: "a" },
+      machine: { id: "m", fingerprint: "fp" },
+      dataset,
+    });
+
+    expect(json).toContain('"__proto__":{"evil":true}');
+    expect(json).toContain('"cores":4');
+  });
+
+  it("a signature over a dataset with an extra __proto__ key must NOT verify against a dataset lacking it", async () => {
+    // Proves the __proto__ fix actually affects the signed bytes, not just
+    // the string output cosmetically: two semantically-different datasets
+    // (one carrying a poisoned __proto__ key, one without) must produce
+    // different canonical JSON and therefore must not cross-verify.
+    const { keyPair, spki } = await generateRsaKeyPair();
+    const accountId = "00000000-0000-0000-0000-000000000000";
+    const machineId = "00000000-0000-0000-0000-000000000001";
+    const fingerprint = "fp-abc";
+
+    const poisonedDataset = JSON.parse(
+      '{"cores":4,"__proto__":{"evil":true}}',
+    ) as Record<string, unknown>;
+    const payloadJson = canonicalJsonStringify({
+      account: { id: accountId },
+      machine: { id: machineId, fingerprint },
+      dataset: poisonedDataset,
+    });
+    const sig = new Uint8Array(
+      await globalThis.crypto.subtle.sign("RSASSA-PKCS1-v1_5", keyPair.privateKey, enc.encode(payloadJson)),
+    );
+    const proof = `v1x0.${base64Encode(sig)}`;
+
+    const plainDataset = { cores: 4 };
+    const result = await verifyOfflineProof(proof, accountId, machineId, fingerprint, plainDataset, spki);
+    expect(result).toBe(false);
+  });
 });

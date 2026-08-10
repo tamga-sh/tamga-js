@@ -27,6 +27,25 @@
  * `machine`, `dataset`, `id`, `fingerprint`, and caller-supplied dataset
  * keys) — Rust's byte-wise `Ord` and JS's UTF-16-code-unit `sort()` agree
  * for the ASCII range.
+ *
+ * ⚠️ **`__proto__`-keyed rebuild trap**: the accumulator below is built with
+ * `Object.create(null)`, not `{}`. A caller-supplied `dataset` can
+ * legitimately contain an own property literally named `"__proto__"` (e.g.
+ * anything that went through `JSON.parse`, which — per spec — creates it as
+ * a normal own data property, not through the inherited legacy accessor).
+ * If the accumulator were a plain `{}`, `result["__proto__"] = value`
+ * would *not* create an own `"__proto__"` property at all: it would invoke
+ * `Object.prototype`'s legacy `__proto__` setter and reassign the
+ * accumulator's own prototype instead, silently dropping that key (and its
+ * value) from the object entirely — `Object.keys`/`JSON.stringify` never
+ * see it again. In `serde_json::Map` (`BTreeMap`-backed) on the Rust side,
+ * `"__proto__"` is just an ordinary string key with no special meaning, so
+ * the server includes it normally. That mismatch would let two
+ * byte-distinct `dataset` payloads (one with an extra `"__proto__"` key,
+ * one without) canonicalize to identical JSON and therefore verify against
+ * the same signature — a real integrity-check bypass, not just a cosmetic
+ * quirk. `Object.create(null)` has no inherited `__proto__` accessor, so
+ * assigning that key behaves like any other string key, matching Rust.
  */
 
 /** Recursively rebuilds `value`, sorting object keys alphabetically at every level. */
@@ -37,7 +56,8 @@ function canonicalize(value: unknown): unknown {
   if (value !== null && typeof value === "object") {
     const source = value as Record<string, unknown>;
     const sortedKeys = Object.keys(source).sort();
-    const result: Record<string, unknown> = {};
+    // Object.create(null): see module doc comment's `__proto__`-keyed rebuild trap.
+    const result: Record<string, unknown> = Object.create(null);
     for (const key of sortedKeys) {
       result[key] = canonicalize(source[key]);
     }
