@@ -27,7 +27,16 @@
  * conventional default salt length used by essentially every PSS signer,
  * including the server's `aws-lc-rs` implementation (`RSA_PSS_2048_8192_SHA256`
  * uses digest-length salt).
+ *
+ * Uses the `getWebCrypto()` accessor from `src/internal/webcrypto.ts`, not
+ * `globalThis.crypto` directly — the latter is missing on Node 18 (this
+ * SDK's documented `engines.node` floor); see that module's doc comment for
+ * why it's a lazy async function, not a top-level-await constant (CJS
+ * builds don't support top-level await — this package builds to both
+ * ESM and CJS).
  */
+
+import { getWebCrypto } from "../internal/webcrypto.js";
 
 const PSS_SALT_LENGTH = 32;
 
@@ -43,7 +52,8 @@ async function importRsaPublicKey(
   publicKey: Uint8Array,
   algorithm: RsaHashedImportParams,
 ): Promise<CryptoKey> {
-  return globalThis.crypto.subtle.importKey("spki", toArrayBuffer(publicKey), algorithm, false, [
+  const webcrypto = await getWebCrypto();
+  return webcrypto.subtle.importKey("spki", toArrayBuffer(publicKey), algorithm, false, [
     "verify",
   ]);
 }
@@ -55,11 +65,12 @@ export async function verifyRsaPkcs1(
   publicKey: Uint8Array,
 ): Promise<boolean> {
   try {
+    const webcrypto = await getWebCrypto();
     const key = await importRsaPublicKey(publicKey, {
       name: "RSASSA-PKCS1-v1_5",
       hash: "SHA-256",
     });
-    return await globalThis.crypto.subtle.verify(
+    return await webcrypto.subtle.verify(
       "RSASSA-PKCS1-v1_5",
       key,
       toArrayBuffer(signature),
@@ -77,8 +88,9 @@ export async function verifyRsaPss(
   publicKey: Uint8Array,
 ): Promise<boolean> {
   try {
+    const webcrypto = await getWebCrypto();
     const key = await importRsaPublicKey(publicKey, { name: "RSA-PSS", hash: "SHA-256" });
-    return await globalThis.crypto.subtle.verify(
+    return await webcrypto.subtle.verify(
       { name: "RSA-PSS", saltLength: PSS_SALT_LENGTH },
       key,
       toArrayBuffer(signature),

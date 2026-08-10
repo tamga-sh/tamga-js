@@ -2,23 +2,26 @@ import { describe, expect, it } from "vitest";
 import { parseProofToken, verifyOfflineProof } from "../src/proof.js";
 import { canonicalJsonStringify } from "../src/internal/canonicalJson.js";
 import { base64Encode } from "../src/internal/base64.js";
+import { getWebCrypto } from "../src/internal/webcrypto.js";
 import { ProofError } from "../src/errors.js";
 
 const enc = new TextEncoder();
 
 async function generateRsaKeyPair() {
-  const keyPair = await globalThis.crypto.subtle.generateKey(
+  const webcrypto = await getWebCrypto();
+  const keyPair = await webcrypto.subtle.generateKey(
     { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
     true,
     ["sign", "verify"],
   );
-  const spki = new Uint8Array(await globalThis.crypto.subtle.exportKey("spki", keyPair.publicKey));
+  const spki = new Uint8Array(await webcrypto.subtle.exportKey("spki", keyPair.publicKey));
   return { keyPair, spki };
 }
 
 async function signPayload(privateKey: CryptoKey, payloadJson: string): Promise<string> {
+  const webcrypto = await getWebCrypto();
   const sig = new Uint8Array(
-    await globalThis.crypto.subtle.sign("RSASSA-PKCS1-v1_5", privateKey, enc.encode(payloadJson)),
+    await webcrypto.subtle.sign("RSASSA-PKCS1-v1_5", privateKey, enc.encode(payloadJson)),
   );
   return base64Encode(sig);
 }

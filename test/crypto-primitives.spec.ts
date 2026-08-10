@@ -4,6 +4,7 @@ import { p256 } from "@noble/curves/nist";
 import { verifyEd25519 } from "../src/crypto/ed25519.js";
 import { verifyEcdsaP256 } from "../src/crypto/ecdsa.js";
 import { verifyRsaPkcs1, verifyRsaPss } from "../src/crypto/rsa.js";
+import { getWebCrypto } from "../src/internal/webcrypto.js";
 
 const enc = new TextEncoder();
 
@@ -73,29 +74,32 @@ describe("verifyEcdsaP256", () => {
 
 /** Generates an RSA-2048 keypair and returns SPKI DER public key + CryptoKeyPair. */
 async function generateRsaKeyPair(usage: "RSASSA-PKCS1-v1_5" | "RSA-PSS") {
-  const keyPair = await globalThis.crypto.subtle.generateKey(
+  const webcrypto = await getWebCrypto();
+  const keyPair = await webcrypto.subtle.generateKey(
     { name: usage, modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
     true,
     ["sign", "verify"],
   );
-  const spki = new Uint8Array(await globalThis.crypto.subtle.exportKey("spki", keyPair.publicKey));
+  const spki = new Uint8Array(await webcrypto.subtle.exportKey("spki", keyPair.publicKey));
   return { keyPair, spki };
 }
 
 describe("verifyRsaPkcs1", () => {
   it("accepts a valid signature", async () => {
+    const webcrypto = await getWebCrypto();
     const { keyPair, spki } = await generateRsaKeyPair("RSASSA-PKCS1-v1_5");
     const message = enc.encode("data");
     const signature = new Uint8Array(
-      await globalThis.crypto.subtle.sign("RSASSA-PKCS1-v1_5", keyPair.privateKey, message),
+      await webcrypto.subtle.sign("RSASSA-PKCS1-v1_5", keyPair.privateKey, message),
     );
     await expect(verifyRsaPkcs1(message, signature, spki)).resolves.toBe(true);
   });
 
   it("rejects a tampered message", async () => {
+    const webcrypto = await getWebCrypto();
     const { keyPair, spki } = await generateRsaKeyPair("RSASSA-PKCS1-v1_5");
     const signature = new Uint8Array(
-      await globalThis.crypto.subtle.sign("RSASSA-PKCS1-v1_5", keyPair.privateKey, enc.encode("original")),
+      await webcrypto.subtle.sign("RSASSA-PKCS1-v1_5", keyPair.privateKey, enc.encode("original")),
     );
     await expect(verifyRsaPkcs1(enc.encode("tampered"), signature, spki)).resolves.toBe(false);
   });
@@ -103,18 +107,20 @@ describe("verifyRsaPkcs1", () => {
 
 describe("verifyRsaPss", () => {
   it("accepts a valid signature", async () => {
+    const webcrypto = await getWebCrypto();
     const { keyPair, spki } = await generateRsaKeyPair("RSA-PSS");
     const message = enc.encode("data");
     const signature = new Uint8Array(
-      await globalThis.crypto.subtle.sign({ name: "RSA-PSS", saltLength: 32 }, keyPair.privateKey, message),
+      await webcrypto.subtle.sign({ name: "RSA-PSS", saltLength: 32 }, keyPair.privateKey, message),
     );
     await expect(verifyRsaPss(message, signature, spki)).resolves.toBe(true);
   });
 
   it("rejects a tampered message", async () => {
+    const webcrypto = await getWebCrypto();
     const { keyPair, spki } = await generateRsaKeyPair("RSA-PSS");
     const signature = new Uint8Array(
-      await globalThis.crypto.subtle.sign(
+      await webcrypto.subtle.sign(
         { name: "RSA-PSS", saltLength: 32 },
         keyPair.privateKey,
         enc.encode("original"),
@@ -124,10 +130,11 @@ describe("verifyRsaPss", () => {
   });
 
   it("a PKCS1 signature does not verify as PSS (cross-scheme confusion check)", async () => {
+    const webcrypto = await getWebCrypto();
     const { keyPair, spki } = await generateRsaKeyPair("RSASSA-PKCS1-v1_5");
     const message = enc.encode("data");
     const signature = new Uint8Array(
-      await globalThis.crypto.subtle.sign("RSASSA-PKCS1-v1_5", keyPair.privateKey, message),
+      await webcrypto.subtle.sign("RSASSA-PKCS1-v1_5", keyPair.privateKey, message),
     );
     await expect(verifyRsaPss(message, signature, spki)).resolves.toBe(false);
   });

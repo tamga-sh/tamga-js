@@ -11,6 +11,7 @@
 import { ed25519 } from "@noble/curves/ed25519";
 import { p256 } from "@noble/curves/nist";
 import { base64Encode } from "../../src/internal/base64.js";
+import { getWebCrypto } from "../../src/internal/webcrypto.js";
 import { encryptAesGcm } from "../../src/crypto/aesGcm.js";
 import type { LicenseScheme } from "../../src/models/policy.js";
 
@@ -111,27 +112,29 @@ async function signForScheme(
       return { publicKey, signature: ed25519.sign(message, secretKey) };
     }
     case "RSA_2048_PKCS1_SIGN": {
-      const keyPair = await globalThis.crypto.subtle.generateKey(
+      const webcrypto = await getWebCrypto();
+      const keyPair = await webcrypto.subtle.generateKey(
         { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
         true,
         ["sign", "verify"],
       );
       const signature = new Uint8Array(
-        await globalThis.crypto.subtle.sign("RSASSA-PKCS1-v1_5", keyPair.privateKey, message),
+        await webcrypto.subtle.sign("RSASSA-PKCS1-v1_5", keyPair.privateKey, message),
       );
-      const publicKey = new Uint8Array(await globalThis.crypto.subtle.exportKey("spki", keyPair.publicKey));
+      const publicKey = new Uint8Array(await webcrypto.subtle.exportKey("spki", keyPair.publicKey));
       return { publicKey, signature };
     }
     case "RSA_2048_PKCS1_PSS_SIGN": {
-      const keyPair = await globalThis.crypto.subtle.generateKey(
+      const webcrypto = await getWebCrypto();
+      const keyPair = await webcrypto.subtle.generateKey(
         { name: "RSA-PSS", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
         true,
         ["sign", "verify"],
       );
       const signature = new Uint8Array(
-        await globalThis.crypto.subtle.sign({ name: "RSA-PSS", saltLength: 32 }, keyPair.privateKey, message),
+        await webcrypto.subtle.sign({ name: "RSA-PSS", saltLength: 32 }, keyPair.privateKey, message),
       );
-      const publicKey = new Uint8Array(await globalThis.crypto.subtle.exportKey("spki", keyPair.publicKey));
+      const publicKey = new Uint8Array(await webcrypto.subtle.exportKey("spki", keyPair.publicKey));
       return { publicKey, signature };
     }
     case "ECDSA_P256_SIGN": {

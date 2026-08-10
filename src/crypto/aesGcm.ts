@@ -5,12 +5,20 @@
  * AES-GCM is a symmetric primitive with universal, stable, hardware-
  * accelerated WebCrypto support across all 4 target runtimes (Node 18+,
  * Deno, Bun, browser); there is no correctness or portability reason to
- * pull in a userland implementation for it. `globalThis.crypto.subtle` is
- * present on Node.js starting with v18 (experimental status pre-v19, but
- * functionally available as a global — see Node's Web Crypto API docs) —
- * this SDK's `engines.node >= 18` floor. See
+ * pull in a userland implementation for it. See
  * `docs/plans/tamga-js.plan.md` §2 "Critical design decision" — do not
  * "simplify" this onto `@noble/ciphers` or similar.
+ *
+ * ⚠️ **Correction to an earlier draft of this comment**: `globalThis.crypto`
+ * is NOT present on Node.js 18 — it was only added as a global starting in
+ * Node 19 (Node 18 only exposes it via `node:crypto`'s `webcrypto` export).
+ * Confirmed the hard way: CI's `node 18` matrix job failed with `Cannot
+ * read properties of undefined (reading 'subtle')` before this module
+ * switched to the `getWebCrypto()` accessor in `src/internal/webcrypto.ts`,
+ * which falls back to `node:crypto`'s export when the global is missing —
+ * see that module's doc comment (including why it's a lazy async function,
+ * not a top-level-await constant). Do not revert to `globalThis.crypto`
+ * directly; it silently breaks Node 18 despite `engines.node >= 18`.
  *
  * Used by:
  * - `src/checkout/licenseFile.ts` — key derived by the naive transform in
@@ -25,12 +33,15 @@
  * 12-byte nonce prefix.
  */
 
+import { getWebCrypto } from "../internal/webcrypto.js";
+
 const NONCE_LENGTH = 12;
 const TAG_LENGTH_BITS = 128;
 
 /** Imports a raw 32-byte key as a non-extractable AES-GCM `CryptoKey`. */
 async function importAesGcmKey(key: Uint8Array): Promise<CryptoKey> {
-  return globalThis.crypto.subtle.importKey("raw", toArrayBuffer(key), { name: "AES-GCM" }, false, [
+  const webcrypto = await getWebCrypto();
+  return webcrypto.subtle.importKey("raw", toArrayBuffer(key), { name: "AES-GCM" }, false, [
     "encrypt",
     "decrypt",
   ]);
@@ -58,8 +69,9 @@ export async function decryptAesGcm(
   if (nonce.length !== NONCE_LENGTH) {
     throw new Error(`AES-GCM nonce must be ${NONCE_LENGTH} bytes, got ${nonce.length}`);
   }
+  const webcrypto = await getWebCrypto();
   const cryptoKey = await importAesGcmKey(key);
-  const plaintext = await globalThis.crypto.subtle.decrypt(
+  const plaintext = await webcrypto.subtle.decrypt(
     { name: "AES-GCM", iv: toArrayBuffer(nonce), tagLength: TAG_LENGTH_BITS },
     cryptoKey,
     toArrayBuffer(ciphertextAndTag),
@@ -78,9 +90,10 @@ export async function encryptAesGcm(
   plaintext: Uint8Array,
   key: Uint8Array,
 ): Promise<{ nonce: Uint8Array; ciphertextAndTag: Uint8Array }> {
-  const nonce = globalThis.crypto.getRandomValues(new Uint8Array(NONCE_LENGTH));
+  const webcrypto = await getWebCrypto();
+  const nonce = webcrypto.getRandomValues(new Uint8Array(NONCE_LENGTH));
   const cryptoKey = await importAesGcmKey(key);
-  const ciphertextAndTag = await globalThis.crypto.subtle.encrypt(
+  const ciphertextAndTag = await webcrypto.subtle.encrypt(
     { name: "AES-GCM", iv: toArrayBuffer(nonce), tagLength: TAG_LENGTH_BITS },
     cryptoKey,
     toArrayBuffer(plaintext),
