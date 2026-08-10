@@ -30,7 +30,7 @@ src/
     policy.ts                    # Policy, LicenseScheme, OverageStrategy, HeartbeatCullStrategy, HeartbeatResurrectionStrategy
   crypto/
     ed25519.ts                  # Ed25519 verify — @noble/curves/ed25519
-    rsa.ts                        # RSA PKCS#1 v1.5 + RSA-PSS verify — @noble/curves
+    rsa.ts                        # RSA PKCS#1 v1.5 + RSA-PSS verify — native crypto.subtle (WebCrypto), see note below
     ecdsa.ts                       # ECDSA P-256 verify — @noble/curves/p256
     aesGcm.ts                       # AES-256-GCM encrypt/decrypt — native crypto.subtle (WebCrypto)
     hkdf.ts                          # HKDF-SHA256 — @noble/hashes/hkdf
@@ -84,9 +84,11 @@ Server-side realities from `docs/sdk.md` → Known Server-Side Gaps that constra
 
 ## Critical Dependency Notes
 
-**Ed25519, RSA (PKCS1/PSS), ECDSA, and HKDF-SHA256 use `@noble/curves` + `@noble/hashes`, not `crypto.subtle`.** These are audited, pure-TypeScript, zero-native-dependency libraries with identical behavior across all 4 target runtimes. `crypto.subtle`'s Ed25519 support in particular is inconsistent across Node/Deno/Bun/browser today — the asymmetric-signature surface is deliberately kept off WebCrypto entirely rather than branching per runtime. Do not "simplify" this onto WebCrypto.
+**Ed25519 and ECDSA P-256 use `@noble/curves`; HKDF-SHA256 uses `@noble/hashes`, not `crypto.subtle`.** These are audited, pure-TypeScript, zero-native-dependency libraries with identical behavior across all 4 target runtimes. `crypto.subtle`'s Ed25519 support in particular is inconsistent across Node/Deno/Bun/browser today — the asymmetric-signature surface for Ed25519/ECDSA is deliberately kept off WebCrypto entirely rather than branching per runtime. Do not "simplify" ed25519.ts/ecdsa.ts onto WebCrypto.
 
-**AES-256-GCM uses native `crypto.subtle` (WebCrypto) directly, with zero npm dependency.** AES-GCM is a symmetric primitive with universal, stable, hardware-accelerated WebCrypto support across all 4 runtimes — there's no correctness or portability reason to pull in `@noble/ciphers` or hand-roll it. Do not move this onto `@noble/*` for "consistency" with the asymmetric primitives above; the two choices are pinned to different runtime-compatibility realities, not a general library preference.
+**⚠️ Deviation from this file's earlier (pre-implementation) draft: RSA (PKCS#1 v1.5 + PSS) verify uses native `crypto.subtle` (WebCrypto), NOT `@noble/curves`.** `@noble/curves` is a pure elliptic-curve library (Ed25519, secp256k1, P-256, BLS12-381, etc.) — it has **no RSA support at all**, so the scaffold-era description above (and the abbreviated Architecture table entry) claiming `rsa.ts` would use `@noble/curves` was never actually implementable. The real `docs/plans/tamga-js.plan.md` §2 always documented the correct alternative in its own parenthetical: *"RSA PKCS#1 v1.5 + RSA-PSS verify — @noble/curves (or WebCrypto RSASSA-*)"* — this implementation takes that WebCrypto branch, which is also consistent with the plan's own reasoning elsewhere ("WebCrypto's RSA verify operations are stable and consistent across all 4 target runtimes, unlike Ed25519"). `src/crypto/rsa.ts`'s module doc comment documents this in full. Because WebCrypto is Promise-based, `verifyRsaPkcs1`/`verifyRsaPss` (and consequently `src/proof.ts` and the RSA branches of `src/checkout/machineFile.ts`) are `async`, unlike the synchronous `@noble/curves`-backed `verifyEd25519`/`verifyEcdsaP256`.
+
+**AES-256-GCM uses native `crypto.subtle` (WebCrypto) directly, with zero npm dependency.** AES-GCM is a symmetric primitive with universal, stable, hardware-accelerated WebCrypto support across all 4 runtimes — there's no correctness or portability reason to pull in `@noble/ciphers` or hand-roll it. Do not move this onto `@noble/*` for "consistency" with the asymmetric primitives above; the two choices (and now RSA's WebCrypto choice too) are pinned to per-primitive runtime-compatibility realities, not a general library preference.
 
 **License-file key derivation (`src/crypto/naiveKey.ts`) is intentionally NOT a KDF** — raw UTF-8 bytes of the license key, zero-padded/truncated to 32 bytes, replicating a real server-side non-hash transform. **Machine-file key derivation (`src/crypto/hkdf.ts`) is a real HKDF-SHA256.** These are two different, correct-for-their-format derivations — don't unify them into one "the license key becomes the AES key" helper.
 
