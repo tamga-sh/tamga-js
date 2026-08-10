@@ -1,0 +1,127 @@
+import { describe, expect, it } from "vitest";
+import {
+  parseApiErrors,
+  errorFromApiError,
+  apiErrorFromResponseBody,
+  NotFoundError,
+  UnauthorizedError,
+  ForbiddenError,
+  InternalServerErrorException,
+  KeyTakenError,
+  FingerprintTakenError,
+  PidTakenError,
+  CheckInNotRequiredError,
+  TtlInvalidError,
+  LicenseNotEncryptedError,
+  LicenseKeyMissingError,
+  SchemeNotSupportedError,
+  DatasetInvalidError,
+  ApiError,
+  TamgaParseError,
+} from "../src/errors.js";
+
+describe("parseApiErrors", () => {
+  it("parses a representative JSON:API error envelope", () => {
+    const errors = parseApiErrors({
+      errors: [
+        {
+          id: "01926b3e-0000-7000-8000-000000000000",
+          status: "404",
+          code: "NOT_FOUND",
+          title: "Not Found",
+          detail: "The requested license was not found",
+        },
+      ],
+    });
+    expect(errors).toEqual([{ status: 404, code: "NOT_FOUND", detail: "The requested license was not found" }]);
+  });
+
+  it("lifts source.pointer to the top level", () => {
+    const errors = parseApiErrors({
+      errors: [
+        {
+          id: "e1",
+          status: "422",
+          code: "DATASET_INVALID",
+          title: "Unprocessable Entity",
+          detail: "dataset must be an object",
+          source: { pointer: "/meta/dataset" },
+        },
+      ],
+    });
+    expect(errors[0]?.pointer).toBe("/meta/dataset");
+  });
+
+  it("throws TamgaParseError for a non-JSON:API-shaped body", () => {
+    expect(() => parseApiErrors({ notErrors: [] })).toThrow(TamgaParseError);
+    expect(() => parseApiErrors(null)).toThrow(TamgaParseError);
+    expect(() => parseApiErrors("a string")).toThrow(TamgaParseError);
+  });
+});
+
+describe("errorFromApiError", () => {
+  const build = (code: string) => ({ status: 0, code, detail: "" });
+
+  it("maps fixed-status codes to their typed variants", () => {
+    expect(errorFromApiError(build("NOT_FOUND"))).toBeInstanceOf(NotFoundError);
+    expect(errorFromApiError(build("UNAUTHORIZED"))).toBeInstanceOf(UnauthorizedError);
+    expect(errorFromApiError(build("FORBIDDEN"))).toBeInstanceOf(ForbiddenError);
+    expect(errorFromApiError(build("INTERNAL_SERVER_ERROR"))).toBeInstanceOf(
+      InternalServerErrorException,
+    );
+  });
+
+  it("maps per-endpoint 409 conflict codes", () => {
+    expect(errorFromApiError(build("KEY_TAKEN"))).toBeInstanceOf(KeyTakenError);
+    expect(errorFromApiError(build("FINGERPRINT_TAKEN"))).toBeInstanceOf(FingerprintTakenError);
+    expect(errorFromApiError(build("PID_TAKEN"))).toBeInstanceOf(PidTakenError);
+  });
+
+  it("maps per-endpoint 422 validation codes", () => {
+    expect(errorFromApiError(build("CHECK_IN_NOT_REQUIRED"))).toBeInstanceOf(CheckInNotRequiredError);
+    expect(errorFromApiError(build("TTL_INVALID"))).toBeInstanceOf(TtlInvalidError);
+    expect(errorFromApiError(build("LICENSE_NOT_ENCRYPTED"))).toBeInstanceOf(LicenseNotEncryptedError);
+    expect(errorFromApiError(build("LICENSE_KEY_MISSING"))).toBeInstanceOf(LicenseKeyMissingError);
+    expect(errorFromApiError(build("SCHEME_NOT_SUPPORTED"))).toBeInstanceOf(SchemeNotSupportedError);
+    expect(errorFromApiError(build("DATASET_INVALID"))).toBeInstanceOf(DatasetInvalidError);
+  });
+
+  it("maps an unrecognized code to the generic ApiError, preserving the code", () => {
+    // 429 TOO_MANY_REQUESTS is declared server-side but never actually
+    // returned (docs/sdk.md Known Server-Side Gaps #5) — a genuine
+    // code-without-a-dedicated-variant example.
+    const mapped = errorFromApiError(build("TOO_MANY_REQUESTS"));
+    expect(mapped).toBeInstanceOf(ApiError);
+    expect(mapped.code).toBe("TOO_MANY_REQUESTS");
+  });
+
+  it("matcher helpers key on code, not detail", () => {
+    const a = errorFromApiError({ status: 404, code: "NOT_FOUND", detail: "detail A" });
+    const b = errorFromApiError({ status: 404, code: "NOT_FOUND", detail: "detail B (changed wording)" });
+    expect(a.code).toBe(b.code);
+    expect(a).toBeInstanceOf(NotFoundError);
+    expect(b).toBeInstanceOf(NotFoundError);
+  });
+});
+
+describe("apiErrorFromResponseBody", () => {
+  it("maps the first error in the envelope", () => {
+    const err = apiErrorFromResponseBody(404, {
+      errors: [{ id: "e", status: "404", code: "NOT_FOUND", title: "x", detail: "gone" }],
+    });
+    expect(err).toBeInstanceOf(NotFoundError);
+  });
+
+  it("falls back to a synthetic ApiError for a non-JSON:API body (e.g. a proxy error page)", () => {
+    const err = apiErrorFromResponseBody(502, "<html>Bad Gateway</html>");
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBe(502);
+    expect(err.code).toBe("UNKNOWN");
+  });
+
+  it("falls back to a synthetic ApiError for an empty errors array", () => {
+    const err = apiErrorFromResponseBody(500, { errors: [] });
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.code).toBe("UNKNOWN");
+  });
+});
