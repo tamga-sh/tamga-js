@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>@tamga/sdk browser quickstart</title>
+  </head>
+  <body>
+    <h1>@tamga/sdk browser quickstart</h1>
+    <p>Open the browser console to see the validation result.</p>
+
+    <!--
+      Loads the built ESM bundle directly — no bundler step required.
+      During local development against a checkout of this repo, point
+      the import at your own `pnpm build` output, e.g.
+      "../../dist/index.js". The specifier below assumes consumption via
+      an ESM-friendly CDN (e.g. esm.sh) that resolves the published npm
+      package — swap in whichever CDN/self-hosting approach your app
+      uses.
+    -->
+    <script type="module">
+      import { TamgaClient } from "https://esm.sh/@tamga/sdk";
+
+      const client = new TamgaClient({
+        accountId: "your-account-id",
+        baseUrl: "https://api.tamga.sh",
+        // A raw license key embedded client-side is inherently visible to
+        // the end user — this is expected for the "License" transport,
+        // which is the primary transport for embedded/client SDKs (see
+        // docs/sdk.md §1). Don't embed a Bearer/Basic account credential
+        // in browser-shipped code.
+        auth: { kind: "license", key: "YOUR-LICENSE-KEY" },
+      });
+
+      const { meta } = await client.validateByKey("YOUR-LICENSE-KEY");
+      console.log(`Validation outcome: ${meta.code} (valid: ${meta.valid})`);
+    </script>
+  </body>
+</html>

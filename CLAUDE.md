@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Full spec and task list: [`docs/plans/tamga-js.plan.md`](./docs/plans/tamga-js.plan.md) (source of truth for scope and checkbox status). Protocol reference this SDK implements against: [`docs/sdk.md`](https://github.com/tamga-sh/tamga-api/blob/main/docs/sdk.md) in `tamga-api` — every field name, endpoint path, and enum value in this codebase should trace back to that file, not to `tamga-api/docs/plans/`.
 
-**Current state**: scaffold only. `src/**` is stub files (typed signatures, TSDoc, `throw new Error("not implemented")` bodies). No HTTP calls, no signature verification, no encryption/decryption. Do not assume any exported function does what its name suggests until its plan section is checked off.
+**Current state**: Sections A–M of `docs/plans/tamga-js.plan.md` are implemented — the full client surface (license validate/check-in/checkout, machine/component/process management, offline proof, entitlements), the offline `.lic`/`.mach` verify/decrypt pipelines, and the typed error model all have real implementations backed by tests (not stubs). Crypto-touching sections (E, F, H) have each passed a mandatory security-reviewer pass (see `docs/plans/tamga-js.plan.md`'s checkboxes for the specific findings, including one real vulnerability found and fixed in `src/internal/canonicalJson.ts`). Check the plan file's checkbox state for the authoritative per-item status before assuming a specific method/field is done.
 
 ## Architecture
 
