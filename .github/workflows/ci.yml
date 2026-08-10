@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["18", "20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - run: corepack enable
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm lint
+
+      - run: pnpm typecheck
+
+      # Coverage thresholds (80% lines/functions/branches/statements) are
+      # enforced by vitest.config.ts, not re-specified here.
+      - run: pnpm test -- --coverage
+
+      # Verifies the tsup dual ESM+CJS build actually emits — a broken
+      # entry/format config would otherwise only surface at publish time.
+      - run: pnpm build
+
+      - uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+  # Separate from the `test` job above: this does NOT run lint/typecheck/test
+  # (those are Node-only tooling). It runs the built dist/ output on Deno and
+  # Bun to catch runtime-incompatible syntax or API usage that Node-only
+  # testing would miss — the whole point of this SDK targeting 4 runtimes
+  # from one codebase.
+  smoke:
+    name: smoke (${{ matrix.runtime }})
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [deno, bun]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - run: corepack enable
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm build
+
+      - if: matrix.runtime == 'deno'
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - if: matrix.runtime == 'deno'
+        run: deno run --allow-read scripts/smoke.mjs
+
+      - if: matrix.runtime == 'bun'
+        uses: oven-sh/setup-bun@v2
+
+      - if: matrix.runtime == 'bun'
+        run: bun run scripts/smoke.mjs

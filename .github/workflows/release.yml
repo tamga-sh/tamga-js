@@ -1,0 +1,65 @@
+name: Release
+
+# Changesets' standard PR-based flow (see .changeset/config.json):
+# 1. Every push to main with pending changeset files causes this job to
+#    open/update a "Version Packages" PR (bumps package.json + writes
+#    CHANGELOG.md from the accumulated .changeset/*.md files).
+# 2. Merging that PR re-triggers this same job; changesets/action detects
+#    there are no pending changesets left and instead runs the `publish`
+#    command below, which is what actually ships the release to npm.
+#
+# There is intentionally one job/workflow for both steps — that's the
+# documented changesets/action@v1 pattern, not an oversight.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      # Required for `npm publish --provenance` to attach a signed GitHub
+      # Actions attestation linking the published package to this exact
+      # workflow run and commit.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - run: corepack enable
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm build
+
+      - name: Create Release Pull Request or Publish
+        id: changesets
+        uses: changesets/action@v1
+        with:
+          # `pnpm release` runs `changeset publish`, which publishes every
+          # package with pending version bumps via `npm publish`, honoring
+          # each package's `publishConfig.access` ("public" — required
+          # because @tamga/sdk is a scoped package and npm defaults scoped
+          # packages to private).
+          publish: pnpm release
+          version: pnpm changeset version
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # npm reads this to attach provenance to every publish in this
+          # run without needing to hand-roll `npm publish --provenance`
+          # around changesets' own publish orchestration.
+          NPM_CONFIG_PROVENANCE: "true"
