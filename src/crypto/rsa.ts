@@ -1,34 +1,90 @@
 /**
  * RSA signature verification (PKCS#1 v1.5 and PSS).
  *
- * STUB — no implementation yet. See `docs/plans/tamga-js.plan.md`
- * Sections F, H.
+ * Backed by native `crypto.subtle` (WebCrypto) — `@noble/curves` has no RSA
+ * support (it's an elliptic-curve library), and WebCrypto's RSA verify
+ * operations are stable and consistent across all 4 target runtimes (unlike
+ * WebCrypto's Ed25519 support — see `src/crypto/ed25519.ts`'s module doc).
+ * This matches `docs/plans/tamga-js.plan.md` §2's own parenthetical for this
+ * module: "RSA PKCS#1 v1.5 + RSA-PSS verify — @noble/curves (or WebCrypto
+ * RSASSA-*)".
  *
  * Used by:
  * - `src/checkout/machineFile.ts` — `RSA_2048_PKCS1_SIGN` and
  *   `RSA_2048_PKCS1_PSS_SIGN` branches of the multi-algorithm dispatch.
  *   ⚠️ `RSA_2048_JWT_RS256` is explicitly rejected server-side for machine
- *   files (`422 SCHEME_NOT_SUPPORTED`) — the eventual dispatcher in
+ *   files (`422 SCHEME_NOT_SUPPORTED`) — the dispatcher in
  *   `machineFile.ts` must throw a clear "unsupported scheme" error for it,
  *   never fall through to one of the verify functions below.
  * - `src/proof.ts` — offline proof is always RSA-2048 PKCS#1 v1.5/SHA-256,
  *   regardless of the license's `scheme`.
+ *
+ * `publicKey` for both functions is a SubjectPublicKeyInfo (SPKI) DER blob
+ * — the same format `tamga-rust`'s `aws-lc-rs`-backed verifier expects,
+ * confirmed against the server's own `extract_public_key`.
+ *
+ * RSA-PSS salt length is fixed at 32 bytes (SHA-256's digest length) — the
+ * conventional default salt length used by essentially every PSS signer,
+ * including the server's `aws-lc-rs` implementation (`RSA_PSS_2048_8192_SHA256`
+ * uses digest-length salt).
  */
 
-/** TODO: RSA PKCS#1 v1.5 / SHA-256 verify. */
-export function verifyRsaPkcs1(
-  _message: Uint8Array,
-  _signature: Uint8Array,
-  _publicKey: Uint8Array,
-): boolean {
-  throw new Error("verifyRsaPkcs1: not implemented — see docs/plans/tamga-js.plan.md Section F");
+const PSS_SALT_LENGTH = 32;
+
+/** Copies a `Uint8Array` into a plain `ArrayBuffer` view WebCrypto accepts uniformly. */
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.length);
+  copy.set(bytes);
+  return copy.buffer;
 }
 
-/** TODO: RSA-PSS / SHA-256 verify. */
-export function verifyRsaPss(
-  _message: Uint8Array,
-  _signature: Uint8Array,
-  _publicKey: Uint8Array,
-): boolean {
-  throw new Error("verifyRsaPss: not implemented — see docs/plans/tamga-js.plan.md Section F");
+/** Imports a SPKI DER public key for the given WebCrypto algorithm. */
+async function importRsaPublicKey(
+  publicKey: Uint8Array,
+  algorithm: RsaHashedImportParams,
+): Promise<CryptoKey> {
+  return globalThis.crypto.subtle.importKey("spki", toArrayBuffer(publicKey), algorithm, false, [
+    "verify",
+  ]);
+}
+
+/** Verifies an RSA-PKCS1v1.5/SHA-256 `signature` over `message`. */
+export async function verifyRsaPkcs1(
+  message: Uint8Array,
+  signature: Uint8Array,
+  publicKey: Uint8Array,
+): Promise<boolean> {
+  try {
+    const key = await importRsaPublicKey(publicKey, {
+      name: "RSASSA-PKCS1-v1_5",
+      hash: "SHA-256",
+    });
+    return await globalThis.crypto.subtle.verify(
+      "RSASSA-PKCS1-v1_5",
+      key,
+      toArrayBuffer(signature),
+      toArrayBuffer(message),
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Verifies an RSA-PSS/SHA-256 `signature` over `message`. */
+export async function verifyRsaPss(
+  message: Uint8Array,
+  signature: Uint8Array,
+  publicKey: Uint8Array,
+): Promise<boolean> {
+  try {
+    const key = await importRsaPublicKey(publicKey, { name: "RSA-PSS", hash: "SHA-256" });
+    return await globalThis.crypto.subtle.verify(
+      { name: "RSA-PSS", saltLength: PSS_SALT_LENGTH },
+      key,
+      toArrayBuffer(signature),
+      toArrayBuffer(message),
+    );
+  } catch {
+    return false;
+  }
 }

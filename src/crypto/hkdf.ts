@@ -1,9 +1,6 @@
 /**
  * HKDF-SHA256 key derivation.
  *
- * STUB — no implementation yet. See `docs/plans/tamga-js.plan.md`
- * Section F.
- *
  * Backed by `@noble/hashes/hkdf` for cross-runtime consistency (same
  * rationale as `src/crypto/ed25519.ts`).
  *
@@ -15,7 +12,16 @@
  * (`src/crypto/naiveKey.ts`) — do not conflate the two.
  */
 
-/** TODO: HKDF-SHA256, output length fixed at 32 bytes for AES-256. */
-export function deriveHkdfKey(_ikm: Uint8Array, _salt: Uint8Array, _info: Uint8Array): Uint8Array {
-  throw new Error("deriveHkdfKey: not implemented — see docs/plans/tamga-js.plan.md Section F");
+import { hkdf } from "@noble/hashes/hkdf";
+import { sha256 } from "@noble/hashes/sha2";
+
+/** AES-256-GCM key length, in bytes. */
+const KEY_LENGTH = 32;
+
+/**
+ * HKDF-SHA256 (RFC 5869): `HKDF-Expand(HKDF-Extract(ikm, salt), info, 32)`.
+ * Output length is fixed at 32 bytes for AES-256.
+ */
+export function deriveHkdfKey(ikm: Uint8Array, salt: Uint8Array, info: Uint8Array): Uint8Array {
+  return hkdf(sha256, ikm, salt, info, KEY_LENGTH);
 }
