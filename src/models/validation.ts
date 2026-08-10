@@ -1,9 +1,6 @@
 /**
  * License validation result types.
  *
- * STUB — types only, no request/response wiring yet. See
- * `docs/plans/tamga-js.plan.md` Section C.
- *
  * `ValidationCode` models all 24 wire values documented in docs/sdk.md §2,
  * evaluated server-side in priority order on the by-ID endpoint. Only 14 are
  * currently reachable — the rest are declared in the server's enum but never
@@ -58,4 +55,20 @@ export interface LicenseValidationResult {
   valid: boolean;
   detail: string;
   code: ValidationCode;
+}
+
+/**
+ * Combined response of `validateByKey`/`validateById`: the (possibly
+ * touched) license resource plus the validation outcome. Quick-validate
+ * returns only a bare {@link LicenseValidationResult} — it has no `data`
+ * envelope, so it does not use this combined type.
+ */
+export interface ValidationResult {
+  /**
+   * The license resource as of this validation call (reflects
+   * `last_validated_at` being bumped, unless `skip_touch: true` was sent).
+   */
+  license: import("./license.js").License;
+  /** The validation outcome. */
+  meta: LicenseValidationResult;
 }
