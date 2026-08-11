@@ -48,7 +48,7 @@ jobs:
       # entry/format config would otherwise only surface at publish time.
       - run: pnpm build
 
-      - uses: codecov/codecov-action@v4
+      - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           # Explicit path required: codecov-action v4's auto-search skips
