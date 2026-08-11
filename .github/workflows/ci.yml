@@ -47,6 +47,11 @@ jobs:
           # gitignored paths, and `coverage/` is gitignored here — without
           # this it silently uploads nothing ("Found 0 coverage files").
           files: ./coverage/lcov.info
+          # Required when CODECOV_TOKEN is the org's shared Global Upload
+          # Token (one token for every Tamga SDK repo) rather than a
+          # per-repo token — without it Codecov can't tell which repo an
+          # upload belongs to.
+          slug: tamga-sh/tamga-js
           fail_ci_if_error: false
 
   # Separate from the `test` job above: this does NOT run lint/typecheck/test
