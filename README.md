@@ -128,8 +128,6 @@ from scratch (no dependency on the reference Rust implementation) — see
   the "Known Server-Side Gaps" section describing what this SDK deliberately
   does not implement (release/auto-update checking, RFC 9421 response
   signing, `Tamga-Environment`, client-side rate-limit backoff).
-- `docs/plans/tamga-js.plan.md` (in the `tamga-sdk` monorepo) — this repo's
-  implementation plan and task list.
 - `CONTRIBUTING.md` — dev setup, commands, and the security-review
   requirement for crypto-touching changes.
 
