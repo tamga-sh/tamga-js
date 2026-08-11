@@ -43,6 +43,10 @@ jobs:
       - uses: codecov/codecov-action@v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+          # Explicit path required: codecov-action v4's auto-search skips
+          # gitignored paths, and `coverage/` is gitignored here — without
+          # this it silently uploads nothing ("Found 0 coverage files").
+          files: ./coverage/lcov.info
           fail_ci_if_error: false
 
   # Separate from the `test` job above: this does NOT run lint/typecheck/test
