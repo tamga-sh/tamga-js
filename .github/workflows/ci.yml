@@ -34,7 +34,15 @@ jobs:
 
       # Coverage thresholds (80% lines/functions/branches/statements) are
       # enforced by vitest.config.ts, not re-specified here.
-      - run: pnpm test -- --coverage
+      #
+      # Deliberately `pnpm test:coverage`, NOT `pnpm test -- --coverage`:
+      # pnpm 10.x inserts its own `--` before forwarded args, so the latter
+      # actually runs `vitest run -- --coverage` — vitest treats anything
+      # after that `--` as a positional test-file filter, not a flag, so
+      # `--coverage` was silently never enabling coverage collection at
+      # all. Confirmed via a CI log showing that literal invocation and
+      # `coverage/lcov.info` never being produced.
+      - run: pnpm test:coverage
 
       # Verifies the tsup dual ESM+CJS build actually emits — a broken
       # entry/format config would otherwise only surface at publish time.
