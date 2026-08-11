@@ -34,7 +34,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           # npm Trusted Publishing (OIDC) requires npm CLI >=11.5.1, which
           # needs Node >=22.14.0 — Node 20's bundled npm is too old.
