@@ -1,6 +1,6 @@
 {
   "name": "@tamga/sdk",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Official JavaScript/TypeScript SDK for Tamga. Integrate license activation, offline verification, and machine management into Node.js, Deno, Bun, and browser applications.",
   "license": "MIT",
   "type": "module",
