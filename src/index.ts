@@ -97,5 +97,5 @@ export { verifyEd25519 } from "./crypto/ed25519.js";
 export { verifyEcdsaP256 } from "./crypto/ecdsa.js";
 export { verifyRsaPkcs1, verifyRsaPss } from "./crypto/rsa.js";
 export { deriveHkdfKey } from "./crypto/hkdf.js";
-export { naiveKeyFromLicenseKey } from "./crypto/naiveKey.js";
+export { deriveLicenseFileKey } from "./crypto/hkdf.js";
 export { decryptAesGcm, encryptAesGcm } from "./crypto/aesGcm.js";

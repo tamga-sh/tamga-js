@@ -22,7 +22,7 @@
  *
  * Used by:
  * - `src/checkout/licenseFile.ts` — key derived by the naive transform in
- *   `src/crypto/naiveKey.ts` (NOT a KDF).
+ *   `src/crypto/hkdf.ts` with the license-file salt.
  * - `src/checkout/machineFile.ts` — key derived by real HKDF-SHA256
  *   (`src/crypto/hkdf.ts`).
  *

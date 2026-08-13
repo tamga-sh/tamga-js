@@ -368,6 +368,7 @@ export class CheckoutError extends TamgaError {
       | "fingerprint-missing"
       | "scheme-not-supported"
       | "ttl-out-of-range"
+      | "expired"
       | "crypto",
   ) {
     super(message);
@@ -388,6 +389,18 @@ export class CheckoutError extends TamgaError {
 
   static unsupportedAlgorithm(alg: string): CheckoutError {
     return new CheckoutError(`unsupported algorithm: ${alg}`, "unsupported-algorithm");
+  }
+
+  /**
+   * The file's signature verified, but its signed `exp` claim is in the past —
+   * an authentic license file that has simply run out.
+   *
+   * Its own kind on purpose: a caller that cannot tell "expired" from "forged"
+   * either warns the user about tampering when their trial merely ended, or
+   * treats a forgery as a renewal prompt.
+   */
+  static expired(exp: number): CheckoutError {
+    return new CheckoutError(`license file expired at unix timestamp ${exp}`, "expired");
   }
 
   static licenseKeyMissing(): CheckoutError {

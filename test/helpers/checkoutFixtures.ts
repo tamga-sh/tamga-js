@@ -46,7 +46,19 @@ export function representativeLicensePayloadJson(): string {
         updated: "2026-01-01T00:00:00Z",
       },
     },
+    // Format v2 puts the claims inside the signed bytes. A payload without
+    // them is a v1 file and no longer verifies.
+    meta: { iat: 1767225600, jti: "test-jti", kid: "test-kid" },
   });
+}
+
+/** The same payload with an `exp` claim, for the expiry tests. */
+export function licensePayloadJsonExpiringAt(exp: number): string {
+  const parsed = JSON.parse(representativeLicensePayloadJson()) as {
+    meta: Record<string, unknown>;
+  };
+  parsed.meta.exp = exp;
+  return JSON.stringify(parsed);
 }
 
 export function representativeMachinePayloadJson(): string {
@@ -72,8 +84,12 @@ export function representativeMachinePayloadJson(): string {
         updated: "2026-01-01T00:00:00Z",
       },
     },
+    // Format v2 puts the claims inside the signed bytes. A payload without
+    // them is a v1 file and no longer verifies.
+    meta: { iat: 1767225600, jti: "test-jti", kid: "test-kid" },
   });
 }
+
 
 /** Builds a `.lic` PEM the same way the real server does — see `src/checkout/licenseFile.ts`. */
 export async function buildLicensePem(
@@ -85,14 +101,14 @@ export async function buildLicensePem(
   let alg: string;
   if (encryptionKey === undefined) {
     encValue = base64Encode(enc.encode(payloadJson));
-    alg = "base64+ed25519";
+    alg = "base64+ed25519+v2";
   } else {
     const { nonce, ciphertextAndTag } = await encryptAesGcm(enc.encode(payloadJson), encryptionKey);
     const combined = new Uint8Array(nonce.length + ciphertextAndTag.length);
     combined.set(nonce, 0);
     combined.set(ciphertextAndTag, nonce.length);
     encValue = base64Encode(combined);
-    alg = "aes-256-gcm+ed25519";
+    alg = "aes-256-gcm+ed25519+v2";
   }
   const sig = base64Encode(ed25519.sign(enc.encode(encValue), signingSecretKey));
   const certJson = JSON.stringify({ enc: encValue, sig, alg });

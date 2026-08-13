@@ -29,7 +29,9 @@
  * Explicitly out of scope (see docs/sdk.md → Known Server-Side Gaps):
  * - `Tamga-Environment` request header — planned EE feature, no server code
  *   path reads it yet.
- * - `X-RateLimit-*` response header handling or 429 retry/backoff — declared
+ * - `X-RateLimit-*` response headers are still not set by the server, so
+ *   `Retry-After` on a 429 is the only rate-limit signal available. 429 itself
+ *   *is* sent and is handled here — see {@link doFetch}. Historical note: `X-RateLimit-*` were declared
  *   in the CORS allowlist only, never set by any handler.
  * - Any `User-Agent` requirement — no server-side check exists. (Also: this
  *   SDK does not set a custom `User-Agent` header at all — `fetch`
@@ -220,15 +222,109 @@ function buildInit(method: string, headers: Headers, jsonBody?: unknown): Reques
   return init;
 }
 
-/** Performs the actual `fetch` call, wrapping network failures in {@link TamgaNetworkError}. */
-async function doFetch(url: URL, init: RequestInit): Promise<Response> {
-  try {
-    return await fetch(url, init);
-  } catch (error) {
-    throw new TamgaNetworkError(
-      `network request to ${url.toString()} failed: ${error instanceof Error ? error.message : String(error)}`,
-      error,
-    );
+/**
+ * How many times a rate-limited (429) request is retried before giving up.
+ *
+ * Three rides out a short burst without turning a sustained 429 into a request
+ * that hangs for minutes.
+ */
+export const DEFAULT_MAX_RETRIES = 3;
+
+/**
+ * How much of a `Retry-After` to honour, in seconds.
+ *
+ * A misconfigured — or hostile — proxy must not be able to park the caller for
+ * an hour on a single header.
+ */
+const MAX_RETRY_AFTER_SECONDS = 60;
+
+/** POST paths safe to repeat after a 429. */
+const RETRYABLE_POST_SUFFIXES = [
+  "/actions/validate",
+  "/actions/validate-key",
+  "/actions/check-in",
+  "/actions/check-out",
+  "/actions/ping",
+];
+
+/**
+ * Is this request safe to repeat after a 429?
+ *
+ * `GET` always is. Among the `POST`s only the licensing *actions* are — they
+ * are effectively idempotent (validate, check in/out, ping a heartbeat) and
+ * they are precisely the calls a client makes on a timer, so they are the ones
+ * that hit the rate limit in the first place.
+ *
+ * Creates are deliberately excluded: retrying `POST /machines` risks a second
+ * activation burning a second seat, and only the caller knows whether that is
+ * acceptable.
+ */
+export function isRetryable(method: string, path: string): boolean {
+  const upper = method.toUpperCase();
+  if (upper === "GET") return true;
+  if (upper !== "POST") return false;
+  return RETRYABLE_POST_SUFFIXES.some((suffix) => path.endsWith(suffix));
+}
+
+/**
+ * Reads `Retry-After` as delta-seconds.
+ *
+ * The HTTP-date form is ignored deliberately: the server sends seconds, and
+ * misreading a date as a duration would be far worse than falling back to the
+ * client's own backoff.
+ */
+export function parseRetryAfter(response: Response): number | undefined {
+  const raw = response.headers.get("Retry-After");
+  if (raw === null) return undefined;
+  const secs = Number.parseInt(raw.trim(), 10);
+  return Number.isFinite(secs) && secs >= 0 ? secs : undefined;
+}
+
+/**
+ * How long to wait before retry number `attempt` (0-based), in milliseconds.
+ *
+ * Prefers the server's `Retry-After` — it knows when the bucket refills, and
+ * guessing wastes the budget — but caps it. Otherwise exponential backoff with
+ * jitter, because a fleet that all retries on the same schedule reconverges
+ * into the spike it was backing off from.
+ */
+export function retryDelayMs(attempt: number, retryAfter?: number): number {
+  if (retryAfter !== undefined) {
+    return Math.min(retryAfter, MAX_RETRY_AFTER_SECONDS) * 1000;
+  }
+  return 2 ** Math.min(attempt, 5) * 1000 + Math.floor(Math.random() * 1000);
+}
+
+/**
+ * Performs the actual `fetch` call, wrapping network failures in
+ * {@link TamgaNetworkError}, and transparently retrying while the server
+ * answers 429.
+ *
+ * Credential-accepting endpoints run on a tight per-IP budget (5 req/s by
+ * default), and the calls a licensing client makes on a timer are exactly the
+ * ones inside it. Without backoff, one throttled request becomes a sustained
+ * burst that keeps the bucket empty and the client never recovers on its own.
+ */
+async function doFetch(url: URL, init: RequestInit, maxRetries = DEFAULT_MAX_RETRIES): Promise<Response> {
+  const retryable = isRetryable(init.method ?? "GET", url.pathname);
+
+  for (let attempt = 0; ; attempt++) {
+    let response: Response;
+    try {
+      response = await fetch(url, init);
+    } catch (error) {
+      throw new TamgaNetworkError(
+        `network request to ${url.toString()} failed: ${error instanceof Error ? error.message : String(error)}`,
+        error,
+      );
+    }
+
+    if (response.status !== 429 || !retryable || attempt >= maxRetries) {
+      return response;
+    }
+
+    const delay = retryDelayMs(attempt, parseRetryAfter(response));
+    await new Promise((resolve) => setTimeout(resolve, delay));
   }
 }
 

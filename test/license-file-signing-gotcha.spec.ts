@@ -38,7 +38,7 @@ describe("license file signing gotcha — string bytes, not decoded bytes", () =
     const certJson = JSON.stringify({
       enc: encString,
       sig: base64Encode(wrongSignature),
-      alg: "base64+ed25519",
+      alg: "base64+ed25519+v2",
     });
     const pemBody = base64Encode(new TextEncoder().encode(certJson));
     const pem = `-----BEGIN LICENSE FILE-----\n${pemBody}\n-----END LICENSE FILE-----`;
@@ -55,7 +55,7 @@ describe("license file signing gotcha — string bytes, not decoded bytes", () =
     const certJson = JSON.stringify({
       enc: encString,
       sig: base64Encode(correctSignature),
-      alg: "base64+ed25519",
+      alg: "base64+ed25519+v2",
     });
     const pemBody = base64Encode(new TextEncoder().encode(certJson));
     const pem = `-----BEGIN LICENSE FILE-----\n${pemBody}\n-----END LICENSE FILE-----`;
