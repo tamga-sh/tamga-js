@@ -41,7 +41,7 @@ describe("TamgaClient.checkOutMachineJson", () => {
             type: "machine-files",
             attributes: {
               certificate: "pem",
-              algorithm: "base64+ed25519",
+              algorithm: "base64+ed25519+v2",
               includes: [],
               ttl: null,
               expiry: null,
