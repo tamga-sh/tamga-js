@@ -5,9 +5,8 @@
  * AES-GCM is a symmetric primitive with universal, stable, hardware-
  * accelerated WebCrypto support across all 4 target runtimes (Node 18+,
  * Deno, Bun, browser); there is no correctness or portability reason to
- * pull in a userland implementation for it. See
- * `docs/plans/tamga-js.plan.md` §2 "Critical design decision" — do not
- * "simplify" this onto `@noble/ciphers` or similar.
+ * pull in a userland implementation for it — do not "simplify" this onto
+ * `@noble/ciphers` or similar.
  *
  * ⚠️ **Correction to an earlier draft of this comment**: `globalThis.crypto`
  * is NOT present on Node.js 18 — it was only added as a global starting in

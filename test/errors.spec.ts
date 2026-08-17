@@ -87,9 +87,10 @@ describe("errorFromApiError", () => {
   });
 
   it("maps an unrecognized code to the generic ApiError, preserving the code", () => {
-    // 429 TOO_MANY_REQUESTS is declared server-side but never actually
-    // returned (docs/sdk.md Known Server-Side Gaps #5) — a genuine
-    // code-without-a-dedicated-variant example.
+    // 429 TOO_MANY_REQUESTS deliberately has no dedicated subclass: the
+    // transport retries it transparently (src/transport.ts::doFetch), so by
+    // the time one reaches the caller the retry budget is already spent and
+    // what to do next is the caller's policy call.
     const mapped = errorFromApiError(build("TOO_MANY_REQUESTS"));
     expect(mapped).toBeInstanceOf(ApiError);
     expect(mapped.code).toBe("TOO_MANY_REQUESTS");

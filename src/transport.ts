@@ -25,14 +25,18 @@
  *   EXCEPT a special-cased parser for `GET .../actions/validate`
  *   (quick-validate): plain `application/json`, flat body, no `data`
  *   envelope.
+ * - `429 TOO_MANY_REQUESTS` retry with backoff — see {@link doFetch},
+ *   {@link isRetryable}, {@link parseRetryAfter} and {@link retryDelayMs}.
+ *   `Retry-After` is parsed and capped; without it, exponential backoff with
+ *   jitter. Retries are scoped to `GET` plus five safe `POST` actions
+ *   (`validate`, `validate-key`, `check-in`, `check-out`, `ping`) — creates
+ *   are excluded, because repeating `POST /machines` can burn a second seat.
  *
- * Explicitly out of scope (see docs/sdk.md → Known Server-Side Gaps):
+ * Explicitly out of scope:
  * - `Tamga-Environment` request header — planned EE feature, no server code
  *   path reads it yet.
- * - `X-RateLimit-*` response headers are still not set by the server, so
- *   `Retry-After` on a 429 is the only rate-limit signal available. 429 itself
- *   *is* sent and is handled here — see {@link doFetch}. Historical note: `X-RateLimit-*` were declared
- *   in the CORS allowlist only, never set by any handler.
+ * - `X-RateLimit-*` response headers — not set by any server handler, so
+ *   `Retry-After` on a 429 is the only rate-limit signal available to read.
  * - Any `User-Agent` requirement — no server-side check exists. (Also: this
  *   SDK does not set a custom `User-Agent` header at all — `fetch`
  *   implementations in browsers refuse to let script set it, and Node/

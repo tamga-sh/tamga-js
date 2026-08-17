@@ -24,10 +24,17 @@
  *   collision. The file's declared suffix is still cross-checked against
  *   what `scheme` implies, so a file/scheme mismatch fails clearly instead
  *   of attempting a verification that can't succeed.
- * - Encryption key (when encrypted) is a REAL HKDF-SHA256 derivation
- *   (`src/crypto/hkdf.ts`), not the naive transform used by license files.
- *   Decrypting a machine file requires BOTH the license key and the target
- *   machine's fingerprint.
+ * - Encryption key (when encrypted) is HKDF-SHA256 (`src/crypto/hkdf.ts`), as
+ *   it is for license files — but with different parameters, and the two must
+ *   not be conflated. A machine file binds `salt =
+ *   "tamga:machine-file-key-v1"`, `ikm = <license key>`, `info =
+ *   <fingerprint>`, so decrypting it requires BOTH the license key and the
+ *   target machine's fingerprint; a license file uses `salt =
+ *   "tamga:license-file-key-v1"`, `info = "license-file"` and needs only the
+ *   license key.
+ * - There is no `+v2` suffix and no signed `meta` claim set on this format —
+ *   that is license-file-only. A machine file's `ttl`/`expiry` are still
+ *   envelope metadata that this SDK cannot enforce; see {@link checkTtl}.
  * - `ttl` is validated server-side (`>0`, `<=31536000` / 365 days) — see
  *   {@link checkTtl} for the client-side pre-check mirroring that range.
  */

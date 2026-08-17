@@ -6,8 +6,8 @@
  * serializer) — several fields here (`product_id`, `duration`,
  * `expiration_basis`, `machine_uniqueness_strategy`, `use_pool`,
  * `protected`, `check_in_interval_count`, `require_heartbeat`, `max_users`)
- * are real server fields not called out in this plan's abbreviated field
- * list.
+ * are real server fields that the abbreviated protocol summary omits — the
+ * serializer, not the summary, is the authority here.
  */
 
 /**

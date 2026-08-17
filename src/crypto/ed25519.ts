@@ -5,9 +5,7 @@
  * deps) rather than `crypto.subtle` — WebCrypto's Ed25519 support is
  * inconsistent across this SDK's 4 target runtimes (Node/Deno/Bun/browser)
  * today, so the asymmetric-signature surface is deliberately kept off
- * WebCrypto entirely. See `docs/plans/tamga-js.plan.md` §2 "Critical design
- * decision" for the full rationale — do not "simplify" this onto
- * `crypto.subtle`.
+ * WebCrypto entirely — do not "simplify" this onto `crypto.subtle`.
  *
  * Used by:
  * - `src/checkout/licenseFile.ts` — license checkout signing is always

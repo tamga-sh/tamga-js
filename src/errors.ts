@@ -18,11 +18,13 @@
  * - Matcher helpers key on `code` (stable), never on `detail` (human text,
  *   may change) — see docs/sdk.md §11.
  *
- * ⚠️ Do NOT build client-side `429 TOO_MANY_REQUESTS` retry/backoff handling.
- * The code is declared in the server's error enum but has no constructor and
- * is never returned by any code path today (docs/sdk.md §11, Known
- * Server-Side Gaps #5). Building backoff logic around it would be dead code
- * that gives a false sense of resilience.
+ * `429 TOO_MANY_REQUESTS` is live and is handled one layer down, in
+ * `src/transport.ts` — a retryable request is retried transparently there
+ * (parsed and capped `Retry-After`, otherwise jittered exponential backoff) and
+ * only surfaces as an error here once the retry budget is spent. It has no
+ * dedicated subclass below on purpose: by the time a 429 reaches the caller,
+ * backing off further is a policy decision only the caller can make, so it maps
+ * to the generic {@link ApiError} with `code === "TOO_MANY_REQUESTS"`.
  */
 
 /** `source.pointer` on a JSON:API error object (RFC 6901 JSON Pointer). */

@@ -46,9 +46,11 @@ export type ValidationCode =
   | (string & {});
 
 /**
- * Shared `meta` shape returned by all three validation endpoints
- * (validate-key, validate-by-id, quick-validate). TODO: wire into the
- * client's response parsing once `src/client.ts` implements the endpoints.
+ * Shared `meta` shape returned by all three validation endpoints, and what
+ * `TamgaClient.validateByKey`/`validateById`/`quickValidate` decode into.
+ *
+ * Match on `code` — it is the stable, machine-readable outcome. `detail` is
+ * human-readable text whose wording can change between server versions.
  */
 export interface LicenseValidationResult {
   ts: string;
