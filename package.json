@@ -1,7 +1,7 @@
 {
   "name": "@tamga/sdk",
   "version": "0.3.0",
-  "description": "Official JavaScript/TypeScript SDK for Tamga. Integrate license activation, offline verification, and machine management into Node.js, Deno, Bun, and browser applications.",
+  "description": "Official JavaScript/TypeScript SDK for Tamga. Integrate license activation, offline verification, and machine management into your JavaScript/TypeScript applications.",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -67,10 +67,10 @@
     "url": "https://github.com/tamga-sh/tamga-js/issues"
   },
   "keywords": [
-    "tamga",
     "licensing",
-    "license-key",
     "software-licensing",
-    "sdk"
+    "license-key",
+    "activation",
+    "entitlements"
   ]
 }
