@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `@tamga/sdk` is the official JavaScript/TypeScript SDK for Tamga (license activation, offline verification, machine management), one of eight hand-written per-language SDKs rather than a binding over the shared `tamga-c` core. It is the only Tamga SDK that must run correctly across four distinct runtimes — Node.js ≥18, Deno, Bun, and browsers — from one codebase and a single dual ESM/CJS build.
 
-Full spec and task list: `docs/plans/tamga-js.plan.md` — **NOTE**: this file lives in the sibling `tamga-sdk` monorepo (`tamga-sdk/docs/plans/tamga-js.plan.md`), not inside this repo. It is the source of truth for scope and checkbox status. The protocol reference this SDK implements against (`docs/sdk.md`) lives in the private `tamga-api` repo — do not link to it from any file published to npm or visible to external readers; link to <https://tamga.sh> instead.
+The Tamga API protocol specification is the source of truth for wire format, endpoint paths, and enum values. It is not a public document and is not part of this repository — never link to it from any file published to npm or visible to external readers; link to <https://tamga.sh> instead.
 
 **Current state**: the full client surface (license validate/check-in/checkout, machine/component/process management, offline proof, entitlements), the offline `.lic`/`.mach` verify/decrypt pipelines, and the typed error model all have real implementations backed by tests (not stubs). Offline license files are at format v2: HKDF-SHA256 key derivation, signed `iat`/`exp`/`jti`/`kid` claims, enforced expiry, and outright rejection of v1 files. Crypto-touching work has passed a mandatory security review, which found and fixed a real `__proto__`-keyed signature-bypass vulnerability in `src/internal/canonicalJson.ts`.
 
@@ -63,7 +63,7 @@ There is no `fmt`/`fmt-check` script in this repo — Prettier is not wired in y
 
 ## GOTCHAS
 
-Server-side realities from `docs/sdk.md` → Known Server-Side Gaps that constrain what this SDK should (and should not) build:
+Server-side realities from the Tamga API protocol specification → Known Server-Side Gaps that constrain what this SDK should (and should not) build:
 
 - **Auth is not enforced on license or machine endpoints server-side** (gap #3). Every client method still sends `Authorization: License <key>` (or the configured transport) for forward-compatibility — a missing/wrong credential is not currently rejected, but the wire format must be correct for when enforcement lands.
 - **Only 14 of 24 `ValidationCode` values are reachable today** (gap #4). `src/models/validation.ts` models all 24 plus a `string & {}` escape hatch — do not write code that treats an unreachable code (`BANNED`, `ENTITLEMENTS_MISSING`, `HEARTBEAT_DEAD`, etc.) as something a caller needs to handle today; document them as forward-compat only.
@@ -72,7 +72,7 @@ Server-side realities from `docs/sdk.md` → Known Server-Side Gaps that constra
 - **`Tamga-Environment` header is not implemented server-side** (gap #7). Do not add it to `src/transport.ts`, even though it's documented as a planned EE feature — no server code path reads it yet.
 - **Heartbeat culling ignores `policy.heartbeat_duration`** (gap #8) — both the 600s machine window and the 30s process window are hardcoded server-side. `src/models/machine.ts` and any heartbeat-scheduler helper must document (and default to) those hardcoded windows, not the per-policy field, which the server itself ignores.
 - **Freshly-created policies default to enum strings that don't exist** (gap #9) — `overage_strategy: "DENY_ACCESS"` and `heartbeat_resurrection_strategy: "NO_RESURRECTION"` are not real variants and silently behave as `NO_OVERAGE`/`NO_REVIVE`. `src/models/policy.ts` types these fields as the real enum unioned with `string & {}` for exactly this reason — don't "fix" the type to reject them.
-- **The release/auto-update endpoint (`GET /releases/actions/upgrade`) crashes at runtime and has no working download-URL endpoint at all** (gaps #1, #2). This SDK does not implement release checking in any form — it is not a v1 deliverable per `docs/sdk.md` §12, not merely deferred tooling. Do not add a "check for update" method.
+- **The release/auto-update endpoint (`GET /releases/actions/upgrade`) crashes at runtime and has no working download-URL endpoint at all** (gaps #1, #2). This SDK does not implement release checking in any form — it is not a v1 deliverable per the Tamga API protocol specification §12, not merely deferred tooling. Do not add a "check for update" method.
 
 ## Testing
 

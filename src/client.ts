@@ -2,11 +2,12 @@
  * `TamgaClient` — the SDK's primary entrypoint.
  *
  * Ground-truthed against `tamga-rust`'s `src/client.rs` (the reference
- * implementation for this SDK family) and `docs/sdk.md`.
+ * implementation for this SDK family) and the Tamga API protocol
+ * specification.
  *
  * Base path: `https://<host>/v1/accounts/{account_id}/...` — `accountId` is
- * required in both singleplayer and multiplayer server modes (docs/sdk.md
- * §1); there is no mode where it can be omitted.
+ * required in both singleplayer and multiplayer server modes (Tamga API
+ * protocol specification §1); there is no mode where it can be omitted.
  *
  * No auth is currently enforced server-side on the license validate/
  * check-in endpoints, but this client sends whatever `auth` transport is
@@ -44,8 +45,8 @@ export interface TamgaClientConfig {
   /** `Tamga-Version` header value. Server default is `"1.8"` if omitted. */
   apiVersion?: string;
   /**
-   * Auth transport used to authenticate every request. Optional — but
-   * `docs/sdk.md` recommends every caller configure
+   * Auth transport used to authenticate every request. Optional — but the
+   * Tamga API protocol specification recommends every caller configure
    * `{ kind: "license", key }` for forward-compatibility with auth
    * enforcement landing server-side later.
    */
@@ -128,8 +129,8 @@ export class TamgaClient {
   /**
    * `POST /licenses/{license_id}/actions/validate` — scoped. Only
    * `product`/`policy`/`user`/`environment` on `scope` are enforced
-   * server-side today (docs/sdk.md §2). `skipTouch: true` suppresses the
-   * `last_validated_at` side effect.
+   * server-side today (Tamga API protocol specification §2).
+   * `skipTouch: true` suppresses the `last_validated_at` side effect.
    */
   async validateById(
     licenseId: string,
@@ -407,7 +408,7 @@ export class TamgaClient {
    * `POST /components` — registers a component against `machineId`. **Not**
    * JSON:API-enveloped on the request side (unlike `createMachine`) — the
    * server expects a flat `{ machine_id, fingerprint, name, metadata }`
-   * body; this is a real asymmetry in `tamga-api`, not an SDK oversight.
+   * body; this is a real asymmetry in the Tamga API, not an SDK oversight.
    * Unique per `(account_id, machine_id, fingerprint)`.
    */
   async createComponent(

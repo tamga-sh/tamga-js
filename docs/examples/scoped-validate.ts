@@ -3,10 +3,10 @@
  *
  * `validateById` calls `POST /licenses/{license_id}/actions/validate`.
  * Only `product`/`policy`/`user`/`environment` are enforced server-side
- * today (docs/sdk.md §2) — `entitlements`/`fingerprint`/`version`/
- * `checksum` are accepted and forwarded for forward-compatibility but are
- * currently parsed and silently ignored by the server. Don't rely on them
- * as functioning constraints yet.
+ * today (Tamga API protocol specification §2) — `entitlements`/
+ * `fingerprint`/`version`/`checksum` are accepted and forwarded for
+ * forward-compatibility but are currently parsed and silently ignored by
+ * the server. Don't rely on them as functioning constraints yet.
  */
 import { TamgaClient } from "@tamga/sdk";
 

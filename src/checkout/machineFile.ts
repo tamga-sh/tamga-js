@@ -2,7 +2,8 @@
  * `MACHINE FILE` offline machine file parse/verify/decrypt pipeline.
  *
  * Ground-truthed against `tamga-rust`'s `src/checkout/machine_file.rs` (the
- * reference implementation for this SDK family) and `docs/sdk.md` §6.
+ * reference implementation for this SDK family) and the Tamga API protocol
+ * specification §6.
  *
  * Same inner `{enc, sig, alg}` JSON structure as license files, but wrapped
  * in `-----BEGIN MACHINE FILE-----`/`-----END MACHINE FILE-----` markers,
@@ -103,7 +104,7 @@ export interface MachineFile {
 }
 
 /**
- * Maps a {@link LicenseScheme} to its `alg` suffix, per `tamga-api`'s
+ * Maps a {@link LicenseScheme} to its `alg` suffix, per the Tamga API's
  * `scheme_to_alg_suffix`. Note both `RSA_2048_PKCS1_SIGN` and
  * `RSA_2048_JWT_RS256` map to the same `"rsa-sha256"` suffix server-side —
  * exactly why {@link verifyAndDecryptMachineFile} always dispatches on the

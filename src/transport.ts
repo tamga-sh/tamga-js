@@ -2,7 +2,8 @@
  * fetch-based HTTP transport layer.
  *
  * Ground-truthed against `tamga-rust`'s `src/transport.rs` + `src/client.rs`
- * (the reference implementation for this SDK family) and `docs/sdk.md` §1.
+ * (the reference implementation for this SDK family) and the Tamga API
+ * protocol specification §1.
  *
  * Built on native `fetch` (universal across Node 18+/Deno/Bun/browser) — no
  * axios/node-fetch dependency.
@@ -77,9 +78,10 @@ export interface TransportConfig {
   /**
    * Auth transport used to authenticate every request. Optional at the
    * transport layer (an unauthenticated request is simply sent with no
-   * `Authorization`/`Cookie`/query-param credential) — but `docs/sdk.md`
-   * recommends every caller configure `{ kind: "license" }` for
-   * forward-compatibility with auth enforcement landing server-side later.
+   * `Authorization`/`Cookie`/query-param credential) — but the Tamga API
+   * protocol specification recommends every caller configure
+   * `{ kind: "license" }` for forward-compatibility with auth enforcement
+   * landing server-side later.
    */
   auth?: AuthCredentials;
 }

@@ -2,7 +2,7 @@
  * License-related resource models.
  *
  * Field set ground-truthed against `tamga-rust`'s `src/models/license.rs`
- * (which itself was ground-truth-verified against `tamga-api`'s actual
+ * (which itself was ground-truth-verified against the Tamga API's actual
  * `LicenseResource`/`LicenseAttributes` serializer) — notably **no
  * `relationships` object exists on this resource today**; do not model one.
  */
@@ -75,9 +75,10 @@ export interface LicenseAttributes {
  * check."
  *
  * Only `product`/`policy`/`user`/`environment` are enforced server-side
- * today (docs/sdk.md §2); `entitlements`/`fingerprint`/`version`/`checksum`
- * are parsed and silently ignored. Kept here for forward-compatibility — do
- * not advertise the latter 4 as functioning constraints.
+ * today (Tamga API protocol specification §2); `entitlements`/
+ * `fingerprint`/`version`/`checksum` are parsed and silently ignored. Kept
+ * here for forward-compatibility — do not advertise the latter 4 as
+ * functioning constraints.
  */
 export interface LicenseScope {
   /** Enforced. Must match the license's product. */

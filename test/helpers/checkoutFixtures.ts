@@ -1,7 +1,8 @@
 /**
  * Test-only fixture builders for `.lic`/`.mach` checkout files, built to
- * exactly mirror the real wire format documented in `docs/sdk.md` §4/§6 and
- * ground-truthed against `tamga-rust`'s own test fixture builders
+ * exactly mirror the real wire format documented in the Tamga API protocol
+ * specification §4/§6 and ground-truthed against `tamga-rust`'s own test
+ * fixture builders
  * (`src/checkout/license_file.rs`/`machine_file.rs` `#[cfg(test)]` modules).
  *
  * Not part of the public API — used only by

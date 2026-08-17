@@ -27,9 +27,9 @@ Run a single test file: `pnpm vitest run test/machine-file-ed25519.spec.ts`.
 
 ## Ground truth
 
-Field names, endpoint paths, and enum values in this SDK should trace back to the protocol reference (`docs/sdk.md`, generated from the running server) rather than to any implementation plan, which was written before implementation and can be stale or abbreviated. When the two disagree, the server wins; document the divergence in the PR description.
+Field names, endpoint paths, and enum values in this SDK should trace back to the Tamga API protocol specification (generated from the running server) rather than to any design document written before implementation, which can be stale or abbreviated. When the two disagree, the server wins; document the divergence in the PR description.
 
-That protocol reference lives in a private repository. If you are an external contributor and need to confirm a wire-format detail, open an issue or ask in the PR — do not guess, and do not link to the private repo from any file that ships to npm.
+That protocol specification is not public. If you are an external contributor and need to confirm a wire-format detail, open an issue or ask in the PR — do not guess.
 
 A completed Rust reference implementation of the same protocol exists at `tamga-rust` (a sibling repo in the `tamga-sdk` family) — useful as a correctness oracle for the crypto-heavy sections (checkout files, offline proof), though this repo never depends on or ports its code directly.
 

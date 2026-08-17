@@ -2,7 +2,8 @@
  * Error model for @tamga/sdk.
  *
  * Ground-truthed against `tamga-rust`'s `src/error.rs` (the reference
- * implementation for this SDK family) and `docs/sdk.md` §11.
+ * implementation for this SDK family) and the Tamga API protocol
+ * specification §11.
  *
  * - `TamgaApiError`: `{ status, code, detail, pointer? }`, a flattened form
  *   of the server's JSON:API error object (`id`, `status`, `code`, `title`,
@@ -16,7 +17,7 @@
  *   falling back to the generic `TamgaApiErrorException` for any code
  *   without a dedicated variant (mirrors `TamgaError::from_json_api_error`).
  * - Matcher helpers key on `code` (stable), never on `detail` (human text,
- *   may change) — see docs/sdk.md §11.
+ *   may change) — see the Tamga API protocol specification §11.
  *
  * `429 TOO_MANY_REQUESTS` is live and is handled one layer down, in
  * `src/transport.ts` — a retryable request is retried transparently there
@@ -125,8 +126,8 @@ export class NotFoundError extends TamgaApiErrorException {
 /**
  * `401 UNAUTHORIZED` — missing or invalid credentials. Not currently
  * reachable on the license/machine endpoints this SDK calls (auth isn't
- * enforced there today — see `docs/sdk.md` Known Server-Side Gaps #3), but
- * modeled for forward-compatibility.
+ * enforced there today — see the Tamga API protocol specification's Known
+ * Server-Side Gaps #3), but modeled for forward-compatibility.
  */
 export class UnauthorizedError extends TamgaApiErrorException {
   static readonly CODE = "UNAUTHORIZED";

@@ -2,7 +2,7 @@
  * Canonical (alphabetical-key) JSON serialization.
  *
  * Not part of the public API — used exclusively by `src/proof.ts` to
- * reproduce the exact byte layout `tamga-api` signs for a machine offline
+ * reproduce the exact byte layout the Tamga API signs for a machine offline
  * proof.
  *
  * ⚠️ Plain `JSON.stringify` in JS/TS serializes object keys in **insertion
@@ -10,9 +10,9 @@
  * Rust's `serde_json::json!(...)` macro, and `serde_json::Map` is
  * `BTreeMap`-backed (alphabetically sorted output) unless the
  * `preserve_order` crate feature is enabled — which it is not anywhere in
- * `tamga-api`'s dependency graph (ground-truth-verified in `tamga-rust`'s
+ * the server's dependency graph (ground-truth-verified in `tamga-rust`'s
  * `src/proof.rs` module doc comment: no `indexmap` next to `serde_json` in
- * either repo's lockfile). So despite the server's source code literally
+ * either lockfile). So despite the server's source code literally
  * writing `{"account": ..., "machine": ..., "dataset": ...}` in that order,
  * the actual bytes on the wire are alphabetically sorted at *every*
  * nesting level: `{"account":...,"dataset":...,"machine":...}` (dataset

@@ -2,7 +2,7 @@
  * Policy resource model and policy-derived enums.
  *
  * Field set ground-truthed against `tamga-rust`'s `src/models/policy.rs`
- * (itself verified against `tamga-api`'s `PolicyResource`/`PolicyAttributes`
+ * (itself verified against the Tamga API's `PolicyResource`/`PolicyAttributes`
  * serializer) — several fields here (`product_id`, `duration`,
  * `expiration_basis`, `machine_uniqueness_strategy`, `use_pool`,
  * `protected`, `check_in_interval_count`, `require_heartbeat`, `max_users`)

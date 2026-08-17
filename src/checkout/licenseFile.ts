@@ -2,7 +2,8 @@
  * `.lic` offline license file parse/verify/decrypt pipeline.
  *
  * Ground-truthed against `tamga-rust`'s `src/checkout/license_file.rs` (the
- * reference implementation for this SDK family) and `docs/sdk.md` §4.
+ * reference implementation for this SDK family) and the Tamga API protocol
+ * specification §4.
  *
  * **File format**:
  * ```text
