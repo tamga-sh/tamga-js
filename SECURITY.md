@@ -4,6 +4,11 @@
 
 `@tamga/sdk` implements, from scratch, the client-side cryptographic verification for Tamga's offline license/machine file formats (`src/checkout/*.ts`) and offline proof tokens (`src/proof.ts`), using audited primitives from `@noble/curves`/`@noble/hashes` and native `crypto.subtle` (WebCrypto) — see `src/crypto/*.ts`. A vulnerability in this surface could allow a forged or tampered offline license/machine file to be accepted as genuine by any application embedding this SDK.
 
+Two properties this surface is expected to hold, both of which changed in file format v2:
+
+- **Both file formats derive their AES-256-GCM key with HKDF-SHA256** (`src/crypto/hkdf.ts::deriveHkdfKey`), never from the license key's raw bytes. License files use `salt = "tamga:license-file-key-v1"`, `ikm = <license key>`, `info = "license-file"` (`src/crypto/hkdf.ts::deriveLicenseFileKey`); machine files use `salt = "tamga:machine-file-key-v1"`, `ikm = <license key>`, `info = <fingerprint>` (`src/checkout/machineFile.ts::verifyAndDecryptMachineFile`). The pre-v2 zero-pad/truncate transform and the module that implemented it were deleted, not deprecated — a caller cannot opt back into the weaker derivation.
+- **A license file's expiry is inside the signature and is enforced.** `meta.exp` is checked against the clock with a 60-second skew tolerance (`src/checkout/licenseFile.ts::verifyLicenseFileWithClaims`), and a file whose `alg` lacks the `+v2` suffix — or whose payload carries no signed `meta` — is rejected. Under v1 the requested TTL lived only in the unsigned response envelope, so a 24-hour trial file stayed cryptographically valid forever.
+
 ## Reporting a vulnerability
 
 Please **do not** open a public GitHub issue for a suspected security vulnerability. Instead:
@@ -16,6 +21,7 @@ We will acknowledge receipt, investigate, and aim to ship a patched release (wit
 ## What counts as a security issue here
 
 - A `.lic`/`.mach` file that should fail signature verification but is accepted (or vice versa: a genuine, correctly-signed file that is incorrectly rejected, which is a functional bug but usually not itself a security issue unless it masks a deeper verification defect).
+- A `.lic` file whose signed `meta.exp` has passed but which still verifies, or a pre-v2 file (no `+v2` in `alg`, or no signed `meta`) that is accepted through any path.
 - A machine offline proof (`"v1x0.<sig>"`) that verifies against a payload it wasn't actually signed for (e.g. a field-order or serialization mismatch that happens to still pass).
 - Any timing side-channel in signature/MAC comparison.
 - Algorithm confusion — e.g. a file declaring one signing scheme being accepted under a different scheme's verifier, or `RSA_2048_JWT_RS256` (explicitly unsupported for machine files) being silently accepted instead of rejected.
@@ -24,7 +30,7 @@ We will acknowledge receipt, investigate, and aim to ship a patched release (wit
 
 ## Review process for this repo
 
-Per `CONTRIBUTING.md`, every change touching `src/checkout/*.ts`, `src/crypto/*.ts`, or `src/proof.ts` requires a dedicated security review (this repo's CI/PR process uses the `security-reviewer` role from the Tamga SDK family's shared review tooling) before merge — a general code review alone does not satisfy this gate. See `docs/plans/tamga-js.plan.md`'s Quality Gates table (§4) for which implementation sections this applies to.
+Per `CONTRIBUTING.md`, every change touching `src/checkout/*.ts`, `src/crypto/*.ts`, or `src/proof.ts` requires a dedicated security review before merge — a general code review alone does not satisfy this gate. This is a human review requirement enforced at PR time; `.github/workflows/ci.yml` runs lint, typecheck, tests with coverage, a build, and a Deno/Bun smoke test, and does not automate the security review.
 
 ## Supported versions
 

@@ -6,6 +6,10 @@
  * not — once you have the PEM string and the account's Ed25519 public
  * key, `verifyAndDecryptLicenseFile` never touches the network. This is
  * the pattern for air-gapped/offline license enforcement.
+ *
+ * Only file format v2 is accepted. A `.lic` issued under v1 is rejected with
+ * no fallback path — re-check-out any file you are still holding from before
+ * v2.
  */
 import { TamgaClient, verifyAndDecryptLicenseFile } from "@tamga/sdk";
 
@@ -18,9 +22,10 @@ const client = new TamgaClient({
 const licenseId = process.env.TAMGA_LICENSE_ID ?? "00000000-0000-0000-0000-000000000000";
 
 // `encrypt: true` requests the AES-256-GCM-encrypted variant — omit or set
-// `false` for a plain (still Ed25519-signed) file. `ttl` is metadata only:
-// it is NOT embedded in the signed payload and NOT re-checked by the
-// server later — enforce any expiry yourself, client-side.
+// `false` for a plain (still Ed25519-signed) file. `ttl` becomes the signed
+// `meta.exp` claim inside the certificate, so verification below enforces it
+// on its own; the `ttl`/`expiry` fields on the response envelope are still
+// unsigned metadata and must not be trusted.
 const pem = await client.checkOutLicense(licenseId, { encrypt: true, ttl: 30 * 24 * 3600 });
 
 // Embed your account's Ed25519 public key (raw 32 bytes) in the shipped
@@ -30,6 +35,10 @@ const ed25519PublicKey = new Uint8Array(
   Buffer.from(process.env.TAMGA_ED25519_PUBLIC_KEY_BASE64 ?? "", "base64"),
 );
 
+// Throws a CheckoutError of kind "expired" if the signed meta.exp has passed
+// (60s clock-skew tolerance). Pass a 4th argument — Unix seconds — to check
+// against a trusted timestamp instead of the local clock, which the end user
+// controls.
 const license = await verifyAndDecryptLicenseFile(
   pem,
   ed25519PublicKey,
