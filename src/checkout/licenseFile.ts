@@ -2,7 +2,8 @@
  * `.lic` offline license file parse/verify/decrypt pipeline.
  *
  * Ground-truthed against `tamga-rust`'s `src/checkout/license_file.rs` (the
- * reference implementation for this SDK family) and `docs/sdk.md` §4.
+ * reference implementation for this SDK family) and the Tamga API protocol
+ * specification §4.
  *
  * **File format**:
  * ```text
@@ -40,8 +41,10 @@
  * 5. Base64-decode `enc`.
  * 6. If `alg` contains `aes-256-gcm`: split `nonce(12B) ‖ ciphertext ‖
  *    tag(16B)`, AES-256-GCM-open with the key from
- *    `src/crypto/hkdf.ts` (HKDF-SHA256, salt `"tamga:license-file-key-v1"`,
- *    padded/truncated to 32 bytes — not a hash or KDF).
+ *    `src/crypto/hkdf.ts::deriveLicenseFileKey` — HKDF-SHA256 (RFC 5869) with
+ *    `salt = "tamga:license-file-key-v1"`, `ikm = <license key>`,
+ *    `info = "license-file"`. The pre-v2 zero-pad/truncate transform is gone,
+ *    not deprecated; there is no code path that still produces that key.
  * 7. Parse the resulting bytes as `{"data": <License>, "meta": <claims>}`.
  * 8. **Enforce `meta.exp`.** Steps 1-7 only establish that the file is
  *    authentic; without this step v2 buys nothing over v1.
@@ -161,10 +164,19 @@ export function parseLicenseFile(pem: string): ParsedLicenseFile {
  * `licenseKey` is required only for the encrypted (`aes-256-gcm+ed25519`)
  * variant; omit it for a plain (`base64+ed25519`) file.
  *
- * See the module doc comment for the full verification flow this
- * implements, and `src/crypto/ed25519.ts`/`src/crypto/hkdf.ts` for the
- * two critical gotchas (signature covers the base64 **string**, not decoded
- * bytes; encryption key is a non-KDF zero-pad/truncate transform).
+ * Only format v2 is accepted: `alg` must carry the `+v2` suffix and the signed
+ * payload must carry its `meta` claims. A v1 file is rejected outright, with no
+ * fallback — see the module doc comment for why.
+ *
+ * `meta.exp` is enforced here, not left to the caller: expiry is checked
+ * against `now` (Unix seconds, defaulting to the system clock) with a
+ * 60-second clock-skew tolerance, and an expired file throws a
+ * `CheckoutError` of kind `"expired"`.
+ *
+ * See the module doc comment for the full verification flow this implements,
+ * and `src/crypto/ed25519.ts` for the critical signing gotcha: the signature
+ * covers the base64 **string**, not its decoded bytes. The AES key comes from
+ * `src/crypto/hkdf.ts::deriveLicenseFileKey` (HKDF-SHA256).
  */
 export async function verifyAndDecryptLicenseFile(
   pem: string,

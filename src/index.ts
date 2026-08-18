@@ -1,8 +1,17 @@
 /**
- * @tamga/sdk — public entrypoint.
+ * `@tamga/sdk` — public entrypoint.
  *
- * Protocol reference: `tamga-api/docs/sdk.md`. Implementation plan and
- * checkbox status: `docs/plans/tamga-js.plan.md` in the `tamga-sdk` monorepo.
+ * Official JavaScript/TypeScript SDK for Tamga: license activation, offline
+ * verification, and machine management. Documentation: https://tamga.sh
+ *
+ * Everything re-exported below is the supported surface. Three groups:
+ *
+ * - {@link TamgaClient} and its models — every networked operation.
+ * - `verifyAndDecryptLicenseFile` / `verifyAndDecryptMachineFile` /
+ *   `verifyOfflineProof` — offline verification, no network access needed once
+ *   the relevant public key is embedded in the calling application.
+ * - The `TamgaError` hierarchy — match on the stable `.code`/`.kind`, never on
+ *   `.message`.
  */
 
 export { TamgaClient } from "./client.js";

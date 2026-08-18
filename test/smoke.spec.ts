@@ -2,11 +2,10 @@ import { describe, expect, it } from "vitest";
 import { TamgaClient } from "../src/index.js";
 
 /**
- * Placeholder so `vitest` has something to run before real feature work
- * lands (docs/plans/tamga-js.plan.md Section A). Replace/expand alongside
- * `src/client.ts` once Section B's constructor validation is implemented —
- * at that point this test's expectations will need to change (right now
- * the stub constructor performs no validation).
+ * The narrowest possible check that the package's public entrypoint is
+ * importable and `TamgaClient` retains the config it was constructed with.
+ * Constructor validation itself is covered by `scripts/smoke.mjs`, which runs
+ * the same assertions against the built `dist/` output on Deno and Bun.
  */
 describe("smoke", () => {
   it("constructs a TamgaClient and stores the config it was given", () => {

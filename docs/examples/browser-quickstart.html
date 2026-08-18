@@ -26,8 +26,8 @@
         // A raw license key embedded client-side is inherently visible to
         // the end user — this is expected for the "License" transport,
         // which is the primary transport for embedded/client SDKs (see
-        // docs/sdk.md §1). Don't embed a Bearer/Basic account credential
-        // in browser-shipped code.
+        // the Tamga API protocol specification §1). Don't embed a
+        // Bearer/Basic account credential in browser-shipped code.
         auth: { kind: "license", key: "YOUR-LICENSE-KEY" },
       });
 

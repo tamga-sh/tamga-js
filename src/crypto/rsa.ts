@@ -5,9 +5,8 @@
  * support (it's an elliptic-curve library), and WebCrypto's RSA verify
  * operations are stable and consistent across all 4 target runtimes (unlike
  * WebCrypto's Ed25519 support — see `src/crypto/ed25519.ts`'s module doc).
- * This matches `docs/plans/tamga-js.plan.md` §2's own parenthetical for this
- * module: "RSA PKCS#1 v1.5 + RSA-PSS verify — @noble/curves (or WebCrypto
- * RSASSA-*)".
+ * Because WebCrypto is Promise-based, the verify functions below are `async`,
+ * unlike the synchronous `@noble/curves`-backed Ed25519/ECDSA ones.
  *
  * Used by:
  * - `src/checkout/machineFile.ts` — `RSA_2048_PKCS1_SIGN` and

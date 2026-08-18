@@ -7,7 +7,7 @@
  *
  * No network calls — this only proves the built ESM entrypoint loads
  * without throwing on each runtime and that `TamgaClient`'s constructor
- * validation (Section B) actually runs.
+ * validation actually runs.
  */
 
 import { TamgaClient } from "../dist/index.js";

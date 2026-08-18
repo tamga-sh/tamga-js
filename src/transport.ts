@@ -2,7 +2,8 @@
  * fetch-based HTTP transport layer.
  *
  * Ground-truthed against `tamga-rust`'s `src/transport.rs` + `src/client.rs`
- * (the reference implementation for this SDK family) and `docs/sdk.md` §1.
+ * (the reference implementation for this SDK family) and the Tamga API
+ * protocol specification §1.
  *
  * Built on native `fetch` (universal across Node 18+/Deno/Bun/browser) — no
  * axios/node-fetch dependency.
@@ -25,14 +26,18 @@
  *   EXCEPT a special-cased parser for `GET .../actions/validate`
  *   (quick-validate): plain `application/json`, flat body, no `data`
  *   envelope.
+ * - `429 TOO_MANY_REQUESTS` retry with backoff — see {@link doFetch},
+ *   {@link isRetryable}, {@link parseRetryAfter} and {@link retryDelayMs}.
+ *   `Retry-After` is parsed and capped; without it, exponential backoff with
+ *   jitter. Retries are scoped to `GET` plus five safe `POST` actions
+ *   (`validate`, `validate-key`, `check-in`, `check-out`, `ping`) — creates
+ *   are excluded, because repeating `POST /machines` can burn a second seat.
  *
- * Explicitly out of scope (see docs/sdk.md → Known Server-Side Gaps):
+ * Explicitly out of scope:
  * - `Tamga-Environment` request header — planned EE feature, no server code
  *   path reads it yet.
- * - `X-RateLimit-*` response headers are still not set by the server, so
- *   `Retry-After` on a 429 is the only rate-limit signal available. 429 itself
- *   *is* sent and is handled here — see {@link doFetch}. Historical note: `X-RateLimit-*` were declared
- *   in the CORS allowlist only, never set by any handler.
+ * - `X-RateLimit-*` response headers — not set by any server handler, so
+ *   `Retry-After` on a 429 is the only rate-limit signal available to read.
  * - Any `User-Agent` requirement — no server-side check exists. (Also: this
  *   SDK does not set a custom `User-Agent` header at all — `fetch`
  *   implementations in browsers refuse to let script set it, and Node/
@@ -73,9 +78,10 @@ export interface TransportConfig {
   /**
    * Auth transport used to authenticate every request. Optional at the
    * transport layer (an unauthenticated request is simply sent with no
-   * `Authorization`/`Cookie`/query-param credential) — but `docs/sdk.md`
-   * recommends every caller configure `{ kind: "license" }` for
-   * forward-compatibility with auth enforcement landing server-side later.
+   * `Authorization`/`Cookie`/query-param credential) — but the Tamga API
+   * protocol specification recommends every caller configure
+   * `{ kind: "license" }` for forward-compatibility with auth enforcement
+   * landing server-side later.
    */
   auth?: AuthCredentials;
 }

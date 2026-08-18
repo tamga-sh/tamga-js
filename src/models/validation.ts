@@ -1,12 +1,13 @@
 /**
  * License validation result types.
  *
- * `ValidationCode` models all 24 wire values documented in docs/sdk.md §2,
- * evaluated server-side in priority order on the by-ID endpoint. Only 14 are
- * currently reachable — the rest are declared in the server's enum but never
- * emitted (see docs/sdk.md → Known Server-Side Gaps #4). They are still
- * modeled here for forward-compatibility: a server-side fix that wires one
- * of them up should not require an SDK type change.
+ * `ValidationCode` models all 24 wire values documented in the Tamga API
+ * protocol specification §2, evaluated server-side in priority order on the
+ * by-ID endpoint. Only 14 are currently reachable — the rest are declared in
+ * the server's enum but never emitted (see that specification's Known
+ * Server-Side Gaps #4). They are still modeled here for
+ * forward-compatibility: a server-side fix that wires one of them up should
+ * not require an SDK type change.
  *
  * The trailing `| (string & {})` member is the standard TypeScript
  * "open union" escape hatch: it accepts any string at the type level
@@ -31,7 +32,8 @@ export type ValidationCode =
   | "TOO_MUCH_DISK"
   | "TOO_MANY_PROCESSES"
   | "TOO_MANY_USES"
-  // Modeled but not reachable via this field today — see docs/sdk.md §2.
+  // Modeled but not reachable via this field today — see the Tamga API
+  // protocol specification §2.
   | "NOT_FOUND"
   | "BANNED"
   | "ENTITLEMENTS_MISSING"
@@ -46,9 +48,11 @@ export type ValidationCode =
   | (string & {});
 
 /**
- * Shared `meta` shape returned by all three validation endpoints
- * (validate-key, validate-by-id, quick-validate). TODO: wire into the
- * client's response parsing once `src/client.ts` implements the endpoints.
+ * Shared `meta` shape returned by all three validation endpoints, and what
+ * `TamgaClient.validateByKey`/`validateById`/`quickValidate` decode into.
+ *
+ * Match on `code` — it is the stable, machine-readable outcome. `detail` is
+ * human-readable text whose wording can change between server versions.
  */
 export interface LicenseValidationResult {
   ts: string;

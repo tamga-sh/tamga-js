@@ -2,7 +2,8 @@
  * Machine offline proof (air-gapped verification).
  *
  * Ground-truthed against `tamga-rust`'s `src/proof.rs` (the reference
- * implementation for this SDK family) and `docs/sdk.md` §7.
+ * implementation for this SDK family) and the Tamga API protocol
+ * specification §7.
  *
  * `POST /machines/{id}/actions/generate-offline-proof`, body
  * `{ "meta": { "dataset": {...} } }` (`dataset` defaults to `{}`). Always

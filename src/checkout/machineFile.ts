@@ -2,7 +2,8 @@
  * `MACHINE FILE` offline machine file parse/verify/decrypt pipeline.
  *
  * Ground-truthed against `tamga-rust`'s `src/checkout/machine_file.rs` (the
- * reference implementation for this SDK family) and `docs/sdk.md` §6.
+ * reference implementation for this SDK family) and the Tamga API protocol
+ * specification §6.
  *
  * Same inner `{enc, sig, alg}` JSON structure as license files, but wrapped
  * in `-----BEGIN MACHINE FILE-----`/`-----END MACHINE FILE-----` markers,
@@ -24,10 +25,17 @@
  *   collision. The file's declared suffix is still cross-checked against
  *   what `scheme` implies, so a file/scheme mismatch fails clearly instead
  *   of attempting a verification that can't succeed.
- * - Encryption key (when encrypted) is a REAL HKDF-SHA256 derivation
- *   (`src/crypto/hkdf.ts`), not the naive transform used by license files.
- *   Decrypting a machine file requires BOTH the license key and the target
- *   machine's fingerprint.
+ * - Encryption key (when encrypted) is HKDF-SHA256 (`src/crypto/hkdf.ts`), as
+ *   it is for license files — but with different parameters, and the two must
+ *   not be conflated. A machine file binds `salt =
+ *   "tamga:machine-file-key-v1"`, `ikm = <license key>`, `info =
+ *   <fingerprint>`, so decrypting it requires BOTH the license key and the
+ *   target machine's fingerprint; a license file uses `salt =
+ *   "tamga:license-file-key-v1"`, `info = "license-file"` and needs only the
+ *   license key.
+ * - There is no `+v2` suffix and no signed `meta` claim set on this format —
+ *   that is license-file-only. A machine file's `ttl`/`expiry` are still
+ *   envelope metadata that this SDK cannot enforce; see {@link checkTtl}.
  * - `ttl` is validated server-side (`>0`, `<=31536000` / 365 days) — see
  *   {@link checkTtl} for the client-side pre-check mirroring that range.
  */
@@ -96,7 +104,7 @@ export interface MachineFile {
 }
 
 /**
- * Maps a {@link LicenseScheme} to its `alg` suffix, per `tamga-api`'s
+ * Maps a {@link LicenseScheme} to its `alg` suffix, per the Tamga API's
  * `scheme_to_alg_suffix`. Note both `RSA_2048_PKCS1_SIGN` and
  * `RSA_2048_JWT_RS256` map to the same `"rsa-sha256"` suffix server-side —
  * exactly why {@link verifyAndDecryptMachineFile} always dispatches on the
