@@ -9,7 +9,7 @@ name: Release
 #    command below, which is what actually ships the release to npm.
 #
 # There is intentionally one job/workflow for both steps — that's the
-# documented changesets/action@v1 pattern, not an oversight.
+# documented changesets/action@v2 pattern, not an oversight.
 on:
   push:
     branches: [main]
@@ -69,7 +69,7 @@ jobs:
 
       - name: Create Release Pull Request or Publish
         id: changesets
-        uses: changesets/action@v1
+        uses: changesets/action@v2
         with:
           # `pnpm release` runs `changeset publish`, which publishes every
           # package with pending version bumps via `npm publish`, honoring
