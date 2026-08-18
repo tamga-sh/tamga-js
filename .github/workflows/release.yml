@@ -50,6 +50,19 @@ jobs:
       - name: Update npm to a version that supports Trusted Publishing
         run: npm install -g npm@latest
 
+      # Release PRs opened with the default GITHUB_TOKEN do not trigger
+      # workflows (GitHub's loop prevention), so CI never reports on the
+      # "Version Packages" PR and branch protection blocks the merge
+      # forever. A GitHub App installation token is a distinct actor, so
+      # PRs it opens DO trigger CI. Scoped to the step below only — the
+      # npm publish in that same step authenticates via OIDC Trusted
+      # Publishing (`id-token: write`), which is unrelated to this token.
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
       - name: Create Release Pull Request or Publish
         id: changesets
         uses: changesets/action@v1
@@ -66,4 +79,4 @@ jobs:
           publish: pnpm release
           version: pnpm changeset version
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
