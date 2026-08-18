@@ -122,7 +122,14 @@ jobs:
     # Changesets' own "Version Packages" PR consumes the changeset files it is
     # releasing, so by definition it carries none — exempt it, or every release
     # PR shows a red check and the gate trains people to ignore it.
-    if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'changeset-release/')
+    # Dependabot cannot author a changeset, so a required check that demands one
+    # would block every dependency PR forever. Its bumps here are dev-only in
+    # practice; when one does reach the published package, the reviewer adds the
+    # changeset by hand.
+    if: >-
+      github.event_name == 'pull_request'
+      && !startsWith(github.head_ref, 'changeset-release/')
+      && github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
