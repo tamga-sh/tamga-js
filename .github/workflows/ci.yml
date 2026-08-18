@@ -101,3 +101,29 @@ jobs:
 
       - if: matrix.runtime == 'bun'
         run: bun run scripts/smoke.mjs
+
+  # Changesets versions from .changeset/*.md files, not from Conventional
+  # Commits — unlike release-please in the sibling SDKs. A PR that forgets one
+  # ships no release at all, silently. This turns that omission into a failed
+  # check. When a change genuinely needs no release (docs, CI, refactors), run
+  # `pnpm changeset --empty` and commit that instead; the decision then becomes
+  # explicit rather than forgotten.
+  changeset:
+    name: changeset present
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - run: corepack enable
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Require a changeset (or an explicit empty one)
+        run: pnpm changeset status --since=origin/${{ github.base_ref }}
