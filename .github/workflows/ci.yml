@@ -110,7 +110,10 @@ jobs:
   # explicit rather than forgotten.
   changeset:
     name: changeset present
-    if: github.event_name == 'pull_request'
+    # Changesets' own "Version Packages" PR consumes the changeset files it is
+    # releasing, so by definition it carries none — exempt it, or every release
+    # PR shows a red check and the gate trains people to ignore it.
+    if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'changeset-release/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
