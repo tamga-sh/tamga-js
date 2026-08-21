@@ -459,8 +459,28 @@ Things this SDK deliberately does not do, or cannot do yet.
   **required by this SDK**, because omitting it drops the channel predicate
   entirely and lets alpha and dev builds answer a production updater.
 
-  Artifact download is still not modelled — the route exists but is walled off
-  by a permission the license-key role does not hold.
+  The artifact bytes behind a release **are** now modelled —
+  `listReleaseArtifacts`, `getArtifact` and `getArtifactDownloadUrl`. They were
+  excluded while `artifact.download` sat in no role's permission set; the server
+  now grants `artifact.read` and `artifact.download` to the license-key role, so
+  an embedded updater can resolve its own build. Create, update, delete and
+  upload are still out — those verbs are not in that set, so nothing this SDK
+  could send would be authorized.
+
+  `getArtifactDownloadUrl` hands back a short-lived presigned URL rather than
+  the bytes, and that is deliberate. Fetch it yourself with a plain
+  `fetch(url)` and **no credentials** — it points at an object store, not at the
+  Tamga API. The route's default answer is a `303` at that URL, and `fetch`
+  follows redirects; the Fetch standard only strips `Authorization` across an
+  *origin* boundary, so a deployment serving object storage from the API's own
+  origin would otherwise receive your licence key. This SDK sends
+  `?redirect=false` and pins the request to `redirect: "manual"` so neither can
+  happen.
+
+  A `403` from the download action is not necessarily a permission problem: the
+  handler enforces the owning release's read gate too — distribution strategy,
+  suspension, expiry, entitlement — so a `CLOSED` release refuses its binary
+  even to a caller that does hold `artifact.download`.
 - **A license key is not confined to its own license on the read routes.** The
   server's `require_license_scope` guard — which stops a license-key credential
   naming a different license — is called by `validate`, `validate-key` and

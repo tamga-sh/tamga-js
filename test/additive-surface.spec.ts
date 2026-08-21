@@ -25,6 +25,7 @@ import type { VerifiedMachineFile } from "../src/checkout/machineFile.js";
 import type { License } from "../src/models/license.js";
 import type { Machine } from "../src/models/machine.js";
 import type { LicenseScheme } from "../src/models/policy.js";
+import type { RequestOptions } from "../src/transport.js";
 
 /** `activateMachine` exactly as it was declared before this change. */
 type PreviousActivateMachine = (
@@ -171,5 +172,38 @@ describe("the offline verification surface only grew", () => {
     // ...and the checkout methods a caller already had are untouched.
     expect(typeof client.checkOutLicense).toBe("function");
     expect(typeof client.checkOutMachine).toBe("function");
+  });
+});
+
+/**
+ * The artifact read/download change (M25) is additive in the same way: three
+ * new client methods, one new model module, and one new **optional** property
+ * on the transport's `RequestOptions`. The optionality is the load-bearing part
+ * — every existing call site constructs a `RequestOptions` without `redirect`,
+ * so a required field there would break all of them at once.
+ */
+type PreviousRequestOptions = {
+  method: string;
+  path: string;
+  body?: unknown;
+  query?: Record<string, string | number | boolean | undefined>;
+};
+
+describe("the artifact surface only grew", () => {
+  it("a RequestOptions built the previous way is still a RequestOptions", () => {
+    const previous: PreviousRequestOptions = { method: "GET", path: "/licenses/lic-1" };
+    // Assignable only because `redirect` is optional.
+    const current: RequestOptions = previous;
+    expect(current.redirect).toBeUndefined();
+  });
+
+  it("the new artifact methods sit beside the release ones, not in place of them", () => {
+    const client = new TamgaClient({ accountId: "acct_1", baseUrl: "https://api.tamga.sh" });
+
+    expect(typeof client.listReleaseArtifacts).toBe("function");
+    expect(typeof client.getArtifact).toBe("function");
+    expect(typeof client.getArtifactDownloadUrl).toBe("function");
+    // ...and the auto-update check a caller already had is untouched.
+    expect(typeof client.checkForUpgrade).toBe("function");
   });
 });

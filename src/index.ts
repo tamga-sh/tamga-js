@@ -21,7 +21,12 @@
  * retry or a different key can fix.
  */
 
-export { TamgaClient, MAX_PAGE_SIZE } from "./client.js";
+export {
+  TamgaClient,
+  MAX_PAGE_SIZE,
+  ARTIFACT_TTL_MIN_SECONDS,
+  ARTIFACT_TTL_MAX_SECONDS,
+} from "./client.js";
 export type {
   TamgaClientConfig,
   CreateMachineOptions,
@@ -31,6 +36,7 @@ export type {
   SortOrder,
   UpdateMachineOptions,
   UpgradeCheckOptions,
+  ArtifactDownloadOptions,
 } from "./client.js";
 
 export type { AuthCredentials, BasicAuthForm, TransportConfig, ResponseInfo } from "./transport.js";
@@ -60,6 +66,11 @@ export {
 } from "./models/machine.js";
 export type { OffsetPage, OffsetPageMeta } from "./models/page.js";
 export type { Release, ReleaseAttributes } from "./models/release.js";
+export type {
+  Artifact,
+  ArtifactAttributes,
+  ArtifactDownloadUrl,
+} from "./models/artifact.js";
 export type { HealthStatus } from "./models/health.js";
 export type {
   Policy,

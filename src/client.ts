@@ -34,7 +34,7 @@ import {
   type AuthCredentials,
   type TransportConfig,
 } from "./transport.js";
-import { FingerprintTakenError, TamgaApiErrorException } from "./errors.js";
+import { FingerprintTakenError, TamgaApiErrorException, TamgaParseError } from "./errors.js";
 import type { License, LicenseScope } from "./models/license.js";
 import type { Entitlement } from "./models/license.js";
 import type { LicenseValidationResult, ValidationCode, ValidationResult } from "./models/validation.js";
@@ -49,6 +49,7 @@ import { effectiveHeartbeatWindowMs } from "./models/policy.js";
 import type { OffsetPage, OffsetPageMeta } from "./models/page.js";
 import { readOffsetPageMeta } from "./models/page.js";
 import type { Release } from "./models/release.js";
+import type { Artifact, ArtifactDownloadUrl } from "./models/artifact.js";
 import type { HealthStatus } from "./models/health.js";
 import type { LicenseFileResource } from "./checkout/licenseFile.js";
 import { checkTtl, type MachineFileResource } from "./checkout/machineFile.js";
@@ -227,6 +228,40 @@ export interface UpdateMachineOptions {
   disk?: number;
   metadata?: Record<string, unknown>;
 }
+
+/**
+ * Options for {@link TamgaClient.getArtifactDownloadUrl}.
+ */
+export interface ArtifactDownloadOptions {
+  /**
+   * How long the presigned URL stays usable, in **seconds**.
+   *
+   * Validated server-side to `[60, 604800]` — one minute to one week
+   * (`artifacts/service.rs:15-38`, `PRESIGN_TTL_MIN`/`PRESIGN_TTL_MAX`). Note
+   * that the download route **validates** rather than clamps: a value outside
+   * the range is refused with `422 PRESIGN_TTL_INVALID` instead of being pulled
+   * to the nearest bound. {@link ARTIFACT_TTL_MIN_SECONDS} and
+   * {@link ARTIFACT_TTL_MAX_SECONDS} are exported so a caller computing a TTL
+   * can clamp it itself.
+   *
+   * Omitted means the server's own default of **300s**, which is deliberately
+   * far shorter than the maximum: the URL is a bearer credential for the bytes,
+   * so ask for the shortest lifetime the download can actually finish in.
+   */
+  ttlSeconds?: number;
+}
+
+/**
+ * Shortest presigned-URL lifetime the download action accepts, in seconds
+ * (`PRESIGN_TTL_MIN`). Anything below is `422 PRESIGN_TTL_INVALID`.
+ */
+export const ARTIFACT_TTL_MIN_SECONDS = 60;
+
+/**
+ * Longest presigned-URL lifetime the download action accepts, in seconds —
+ * one week (`PRESIGN_TTL_MAX`). Anything above is `422 PRESIGN_TTL_INVALID`.
+ */
+export const ARTIFACT_TTL_MAX_SECONDS = 604_800;
 
 /**
  * Query for {@link TamgaClient.checkForUpgrade}. The first four fields are
@@ -1676,6 +1711,121 @@ export class TamgaClient {
   async hasEntitlement(licenseId: string, code: string, limit = 100): Promise<boolean> {
     const entitlements = await this.listEntitlements(licenseId, { limit });
     return entitlements.some((e) => e.attributes.code === code);
+  }
+
+  // ---------------------------------------------------------------------
+  // Artifacts
+  // ---------------------------------------------------------------------
+
+  /**
+   * `GET /releases/{release_id}/artifacts` — the uploaded builds attached to
+   * one release.
+   *
+   * Keyset-paginated (`limit`, `page[after]`) like {@link listComponents}, not
+   * offset-paginated like {@link listMachines}. `limit` is clamped to 100
+   * server-side and defaults to 25 when omitted; the response carries no
+   * `meta.page` and no `links`, so a short page is the only end-of-list signal
+   * and this SDK sends 100 when the caller gives no `limit`.
+   *
+   * {@link ArtifactAttributes.redirectUrl} is **absent** from every element —
+   * it is populated only by {@link getArtifactDownloadUrl}. Pick the artifact
+   * whose `platform`/`arch`/`filetype` you want here, then resolve a URL for it.
+   *
+   * Reachable with a license key: `artifact.read` is in `Role::LicenseToken`'s
+   * default permission set (`shared/authz/mod.rs:264`).
+   */
+  async listReleaseArtifacts(releaseId: string, opts: ListOptions = {}): Promise<Artifact[]> {
+    const { data } = await sendJsonApi<Artifact[]>(this.transport, {
+      method: "GET",
+      path: `/releases/${releaseId}/artifacts`,
+      query: { limit: opts.limit ?? MAX_PAGE_SIZE, "page[after]": opts.after },
+    });
+    return data;
+  }
+
+  /**
+   * `GET /artifacts/{artifact_id}` — one artifact's metadata.
+   *
+   * Note the flat path: an artifact is addressed directly under the account,
+   * not under the release that owns it, even though {@link listReleaseArtifacts}
+   * is nested. Both are the server's own shapes
+   * (`features/artifacts/mod.rs:32-40`).
+   *
+   * Returns `checksum` and `signature` when the publisher set them, which is
+   * what an updater needs to verify the bytes it fetched. {@link
+   * ArtifactAttributes.redirectUrl} is absent here — this route never presigns.
+   */
+  async getArtifact(artifactId: string): Promise<Artifact> {
+    const { data } = await sendJsonApi<Artifact>(this.transport, {
+      method: "GET",
+      path: `/artifacts/${artifactId}`,
+    });
+    return data;
+  }
+
+  /**
+   * `GET /artifacts/{artifact_id}/actions/download` — resolves a short-lived
+   * presigned storage URL for the artifact's bytes.
+   *
+   * **This call does not download anything.** It returns the URL, and the
+   * caller fetches it — as a plain `fetch(url)` with **no** credentials. That
+   * split is the point of the method, not an inconvenience:
+   *
+   * ⚠️ The route's *default* answer is a `303 See Other` at the presigned URL,
+   * and `fetch` follows redirects unless told not to. This SDK therefore always
+   * sends `?redirect=false`, which makes the server return the artifact
+   * resource with {@link ArtifactAttributes.redirectUrl} populated instead, and
+   * additionally pins the request to `redirect: "manual"` so a redirect that
+   * arrives anyway is thrown rather than chased. The Fetch standard strips
+   * `Authorization` only across an *origin* boundary — measured on Node 22,
+   * Deno 2.9 and Bun 1.3 — so a deployment whose object storage shares an
+   * origin with the API (path-style S3 behind the same proxy) would otherwise
+   * hand the licence key to the storage layer. See
+   * {@link import("./transport.js").RequestOptions.redirect}.
+   *
+   * ⚠️ **A `403` here is not necessarily an auth misconfiguration.** The
+   * handler enforces the owning *release's* read gate as well as the
+   * `artifact.download` permission: it loads the release and runs
+   * `releases::service::enforce_release_access` — distribution strategy,
+   * suspension, expiry, entitlement — before presigning
+   * (`download_artifact.rs:46-59`). A `CLOSED` release's binary is refused to a
+   * caller that genuinely holds `artifact.download`, and an expired or
+   * suspended licence is refused the same way. Treat it as *this licence may
+   * not have these bytes*, not as *this token is missing a permission*.
+   *
+   * A `422` is one of two things: `PRESIGN_TTL_INVALID` if
+   * {@link ArtifactDownloadOptions.ttlSeconds} was outside
+   * `[{@link ARTIFACT_TTL_MIN_SECONDS}, {@link ARTIFACT_TTL_MAX_SECONDS}]`, or
+   * `STORAGE_UNAVAILABLE` if the deployment has no object storage configured at
+   * all — the second is a server deployment fault, not a caller error.
+   *
+   * ⚠️ `PRESIGN_TTL_INVALID` is **not** the `TTL_INVALID` the checkout routes
+   * send, so it does **not** arrive as
+   * {@link import("./errors.js").TtlInvalidError}. The API uses two different
+   * codes for a bad `ttl` (`artifacts/service.rs:33` versus
+   * `check_out_license.rs:48`), and only the checkout spelling has a typed
+   * subclass. This one surfaces as the generic
+   * {@link import("./errors.js").ApiError} with `code === "PRESIGN_TTL_INVALID"`
+   * — match on the code, as everywhere else in this SDK.
+   */
+  async getArtifactDownloadUrl(
+    artifactId: string,
+    opts: ArtifactDownloadOptions = {},
+  ): Promise<ArtifactDownloadUrl> {
+    const { data } = await sendJsonApi<Artifact>(this.transport, {
+      method: "GET",
+      path: `/artifacts/${artifactId}/actions/download`,
+      query: { redirect: false, ttl: opts.ttlSeconds },
+      redirect: "manual",
+    });
+    const url = data.attributes.redirectUrl;
+    if (url === undefined) {
+      throw new TamgaParseError(
+        `the download action for artifact ${artifactId} returned no redirectUrl; ` +
+          `the server was asked for ?redirect=false, which is the form that populates it`,
+      );
+    }
+    return { artifact: data, url };
   }
 
   // ---------------------------------------------------------------------

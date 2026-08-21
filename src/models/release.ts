@@ -27,9 +27,12 @@ export interface Release {
  * Attributes of a {@link Release}.
  *
  * No download URL and no artifact list: the upgrade check answers with the
- * release *record*, and the bytes live behind the separate artifact endpoints
- * this SDK does not model. `version` is what an updater compares against; how
- * it fetches the build is the calling application's business.
+ * release *record*, and the bytes live behind the separate artifact endpoints.
+ * `version` is what an updater compares against; to reach the build itself,
+ * pass this release's `id` to
+ * {@link import("../client.js").TamgaClient.listReleaseArtifacts} and then
+ * resolve a presigned URL with
+ * {@link import("../client.js").TamgaClient.getArtifactDownloadUrl}.
  */
 export interface ReleaseAttributes {
   /** The owning product's ID — camelCase on the wire, see this module's doc. */

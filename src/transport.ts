@@ -57,7 +57,7 @@
  *   server never reads.)
  */
 
-import { apiErrorFromResponseBody, TamgaNetworkError, TamgaParseError } from "./errors.js";
+import { apiErrorFromResponseBody, TamgaError, TamgaNetworkError, TamgaParseError } from "./errors.js";
 
 /** The 3 sub-forms of HTTP Basic auth the server accepts. */
 export type BasicAuthForm =
@@ -264,10 +264,18 @@ function buildHeaders(config: TransportConfig, contentType?: string): Headers {
  * declares `body?: BodyInit | null` and does not accept an explicit
  * `undefined` assignment to that property.
  */
-function buildInit(method: string, headers: Headers, jsonBody?: unknown): RequestInit {
+function buildInit(
+  method: string,
+  headers: Headers,
+  jsonBody?: unknown,
+  redirect?: RequestRedirect,
+): RequestInit {
   const init: RequestInit = { method, headers };
   if (jsonBody !== undefined) {
     init.body = JSON.stringify(jsonBody);
+  }
+  if (redirect !== undefined) {
+    init.redirect = redirect;
   }
   return init;
 }
@@ -470,6 +478,35 @@ export interface RequestOptions {
   path: string;
   body?: unknown;
   query?: Record<string, string | number | boolean | undefined>;
+  /**
+   * Overrides `fetch`'s redirect handling for this one request. Omitted means
+   * the platform default, which is `"follow"` — every route this SDK calls
+   * answers 2xx/4xx, so following is normally moot.
+   *
+   * ⚠️ **One route is not moot: the artifact download action.** It answers
+   * `303 See Other` pointing at a short-lived presigned storage URL, and under
+   * `"follow"` the redirect is chased with the original request still in hand.
+   * Two measured consequences, both bad:
+   *
+   * 1. **Same-origin storage leaks the credential.** The Fetch standard drops
+   *    `Authorization` (and `Cookie`) only when the redirect crosses an
+   *    *origin*; a same-origin `Location` keeps them. Measured on Node 22,
+   *    Deno 2.9 and Bun 1.3: a cross-origin hop arrives with no credential, a
+   *    same-origin hop arrives carrying `Authorization: License <key>` intact.
+   *    A self-hosted deployment that serves path-style object storage from the
+   *    API's own origin (which `s3_endpoint` + `s3_force_path_style` exist to
+   *    allow) is exactly the same-origin case, and it hands the licence key to
+   *    the storage layer.
+   * 2. **Even when nothing leaks, the result is wrong.** The follow lands on
+   *    the artifact *bytes*, which {@link sendJsonApi} then buffers into a
+   *    string inside the per-attempt deadline before failing to parse them as
+   *    JSON. An artifact may be up to 1 GiB.
+   *
+   * So the download call sets this to `"manual"` **and** asks the server for
+   * `redirect=false`. The query parameter is the mechanism; this is the net
+   * under it, and it turns a silent credential forward into a thrown error.
+   */
+  redirect?: RequestRedirect;
 }
 
 /** A successful response, decoded, plus the response headers a caller may want to inspect. */
@@ -486,6 +523,36 @@ export interface TransportResultWithMeta<T, M> {
 }
 
 /**
+ * Fails loudly when a request that opted out of redirect-following got a
+ * redirect anyway.
+ *
+ * Inert unless {@link RequestOptions.redirect} was set — every other call is
+ * left on the platform default and never reaches the throw. Only the artifact
+ * download action sets it, and only because that route is the one that can
+ * answer `303`; see {@link RequestOptions.redirect} for what following it
+ * would cost.
+ *
+ * Two shapes have to be recognised because the runtimes disagree about what a
+ * suppressed redirect looks like. Node/Deno/Bun hand back the real `3xx`
+ * response with its `Location` header readable; a browser hands back an
+ * opaque-redirect filtered response, whose status is `0` and whose headers are
+ * empty. Checking only the status range would miss the browser entirely — the
+ * runtime this SDK is least able to reason about and the one where a leaked
+ * credential is worst.
+ */
+function assertNotRedirect(response: Response, opts: RequestOptions, url: URL): void {
+  if (opts.redirect === undefined || opts.redirect === "follow") return;
+  const isRedirect = response.type === "opaqueredirect" || (response.status >= 300 && response.status < 400);
+  if (!isRedirect) return;
+  throw new TamgaError(
+    `request to ${url.pathname} answered a redirect that this SDK deliberately did not follow ` +
+      `(status ${response.status}). The redirect target is an object store, not the Tamga API, ` +
+      `and following it would carry the request's credentials to it. Expected the server to honour ` +
+      `?redirect=false and return the artifact resource instead.`,
+  );
+}
+
+/**
  * Sends a JSON:API request (`Content-Type: application/vnd.api+json`,
  * optional JSON body) and decodes a `{ data: T }` envelope on success, or
  * throws a typed error (see `src/errors.ts`) on a non-2xx status.
@@ -498,10 +565,11 @@ export async function sendJsonApi<T>(
   const headers = buildHeaders(config, "application/vnd.api+json");
   const { response, text } = await doFetch(
     url,
-    buildInit(opts.method, headers, opts.body),
+    buildInit(opts.method, headers, opts.body, opts.redirect),
     config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
   );
   const responseInfo = extractResponseInfo(response.headers);
+  assertNotRedirect(response, opts, url);
   const body = parseJsonText(text);
   if (!response.ok) {
     throw apiErrorFromResponseBody(response.status, body);
