@@ -303,11 +303,13 @@ export async function verifyLicenseFileWithClaims(
   }
   // Second line behind the `alg` gate: a file must not reach the expiry check
   // with nothing to check.
-  // `typeof null === "object"`, so the null check is not redundant: without it
-  // a `"meta": null` payload reaches the expiry check and dies on a property
-  // access instead of returning a typed CheckoutError.
+  // `typeof null === "object"` and so is an array, so neither extra check is
+  // redundant: without the null check a `"meta": null` payload reaches the
+  // expiry check and dies on a property access instead of returning a typed
+  // CheckoutError, and an array `meta` would read `claims.exp` as `undefined`
+  // and skip expiry enforcement silently.
   const meta = (payload as { meta?: unknown }).meta;
-  if (typeof meta !== "object" || meta === null) {
+  if (typeof meta !== "object" || meta === null || Array.isArray(meta)) {
     throw CheckoutError.invalidJson(
       "payload is missing the signed 'meta' claims (this looks like a pre-v2 file)",
     );

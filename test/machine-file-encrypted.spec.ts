@@ -186,3 +186,30 @@ describe("verifyAndDecryptMachineFile — enc separator handling", () => {
     ).resolves.toBeDefined();
   });
 });
+
+describe("verifyAndDecryptMachineFile — malformed signed meta", () => {
+  const ALG = "base64+ed25519+v2";
+  const b64 = (s: string): string => Buffer.from(s, "utf8").toString("base64");
+
+  /** Every one of these must fail loud rather than skip the expiry check. */
+  it.each([
+    ["null", "null"],
+    ["an array", "[]"],
+    ["a string", '"nope"'],
+    ["a number", "1767225600"],
+    ["absent", undefined],
+  ])("refuses a payload whose meta is %s", async (_label, metaJson) => {
+    const payload =
+      metaJson === undefined
+        ? '{"data":{"type":"machines","id":"x","attributes":{}}}'
+        : `{"data":{"type":"machines","id":"x","attributes":{}},"meta":${metaJson}}`;
+    const { publicKey, pem } = await buildSignedMachinePemFromEnc(
+      "ED25519_SIGN",
+      b64(payload),
+      ALG,
+    );
+    await expect(
+      verifyAndDecryptMachineFile(pem, "ED25519_SIGN", publicKey),
+    ).rejects.toMatchObject({ kind: "invalid-json" });
+  });
+});

@@ -68,8 +68,18 @@ changed. `kid` is exposed but nothing selects a key by it yet — key rotation i
 a separate change.
 
 Also fixed: a `"meta": null` payload reached the license-file expiry check and
-died on a property access instead of returning a typed `CheckoutError`, and
-`CheckoutError.expired`'s message said "license file" for both formats.
+died on a property access instead of returning a typed `CheckoutError`; an
+array `meta` would have read `exp` as `undefined` and skipped expiry
+enforcement silently, so both formats now reject any `meta` that is not a plain
+object; and `CheckoutError.expired`'s message said "license file" for both
+formats.
+
+Semver note: `verifyEcdsaP256` is an exported primitive whose behaviour
+changes, so `patch` is a deliberate call rather than an oversight. The previous
+behaviour verified against a truncation of the message instead of its SHA-256
+digest, which never accepted a real server signature — it was fail-closed, not
+a working contract, and there is nothing a caller could have built on it. An
+external caller who pre-hashed as a workaround should stop doing so.
 
 Testing: `test/fixtures/machine-file-v2/` holds 12 certificates produced by the
 server's `encode_machine_file` — four signing schemes by three variants —

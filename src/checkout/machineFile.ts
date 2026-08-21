@@ -457,8 +457,13 @@ export async function verifyMachineFileWithClaims(
   }
   // Second line behind the `alg` gate: a file must not reach the expiry check
   // with nothing to check.
+  // `typeof null === "object"` and so is an array, so neither check is
+  // redundant. An array `meta` would read `claims.exp` as `undefined` and skip
+  // expiry enforcement silently — the exact failure this whole change exists to
+  // remove. Only the signing key can produce one, since `meta` lives inside the
+  // authenticated bytes; this is defence in depth against a server regression.
   const meta = (payload as { meta?: unknown }).meta;
-  if (typeof meta !== "object" || meta === null) {
+  if (typeof meta !== "object" || meta === null || Array.isArray(meta)) {
     throw CheckoutError.invalidJson(
       "payload is missing the signed 'meta' claims (this looks like a pre-v2 file)",
     );
