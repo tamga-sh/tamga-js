@@ -10,6 +10,8 @@
  * serializer, not the summary, is the authority here.
  */
 
+import { MACHINE_HEARTBEAT_WINDOW_MS } from "./machine.js";
+
 /**
  * Signing scheme used for license/machine checkout files (and, always,
  * regardless of this value, machine offline proofs — see `src/proof.ts`).
@@ -87,12 +89,28 @@ export function resolveOverageStrategy(raw: string): OverageStrategy {
   }
 }
 
-/** What happens to a machine row once its heartbeat window elapses. */
+/**
+ * What the server's cull job does with a machine row whose heartbeat window
+ * has elapsed.
+ *
+ * ⚠️ **Only consulted when the policy sets `require_heartbeat = true`**, and
+ * that column defaults to `false`: the cull job returns early for such a
+ * policy and never claims its machines, so under a default policy neither
+ * variant here ever runs and no row is ever culled. A machine's
+ * `heartbeat_status` sitting at `"DEAD"` — as a checked-out machine file can
+ * report — is therefore not evidence that this strategy was applied; see
+ * {@link import("./machine.js").HeartbeatStatus}.
+ */
 export type HeartbeatCullStrategy = "DEACTIVATE_DEAD" | "KEEP_DEAD";
 
 /**
- * How long after heartbeat expiry a dead machine may still be revived by a
- * new ping, before {@link HeartbeatCullStrategy} takes effect.
+ * How long after heartbeat expiry the cull job still lets a dead machine be
+ * revived, before {@link HeartbeatCullStrategy} takes effect.
+ *
+ * ⚠️ This governs the cull job only — it is **not** a window on
+ * `ping-heartbeat`. The ping handler is a bare `last_heartbeat_at = now`
+ * write with no resurrection check, so a ping revives a `DEAD` machine
+ * whatever this says, for as long as the row exists.
  */
 export type HeartbeatResurrectionStrategy =
   | "NO_REVIVE"
@@ -138,15 +156,23 @@ export type CheckInInterval = "day" | "week" | "month" | "year";
  * Named recognized values for the free-text `expiration_strategy` policy
  * field — the server branches on literal string match, not a closed enum,
  * so this is documentation/autocomplete only, not a validated type.
- * `"RESTRICT_ACCESS"` is the default; `"MAINTAIN_ACCESS"`/`"ALLOW_ACCESS"`
- * permit access after expiry. Any value outside this list is branched as
- * "deny/default" server-side — treat unrecognized values the same way
- * client-side.
+ * `"RESTRICT_ACCESS"` is the default. Any value outside this list is
+ * branched as "deny/default" server-side — treat unrecognized values the
+ * same way client-side.
+ *
+ * The distinction that matters at the **auth gate**: under
+ * `"MAINTAIN_ACCESS"` / `"ALLOW_ACCESS"` / `"RESTRICT_ACCESS"` an expired
+ * license still authenticates, and the expiry shows up as an `EXPIRED`
+ * validation code on a 200 response. Under `"REVOKE_ACCESS"` the credential
+ * itself is rejected with `401 LICENSE_EXPIRED` — see
+ * {@link import("../errors.js").LicenseExpiredError} — so no endpoint,
+ * including validate, is reachable at all.
  */
 export const ExpirationStrategy = {
   RESTRICT_ACCESS: "RESTRICT_ACCESS",
   MAINTAIN_ACCESS: "MAINTAIN_ACCESS",
   ALLOW_ACCESS: "ALLOW_ACCESS",
+  REVOKE_ACCESS: "REVOKE_ACCESS",
 } as const;
 
 /**
@@ -162,14 +188,22 @@ export const RenewalBasis = {
 
 /**
  * Named recognized values for the free-text `authentication_strategy`
- * policy field. `"TOKEN"` is the default; `"LICENSE"`/`"MIXED"` permit
- * license-key bearer auth. See {@link ExpirationStrategy}'s doc comment for
- * the "free-text, not a closed enum" caveat — it applies here too.
+ * policy field. See {@link ExpirationStrategy}'s doc comment for the
+ * "free-text, not a closed enum" caveat — it applies here too.
+ *
+ * ⚠️ **License-key auth is off by default.** The server accepts an
+ * `Authorization: License <key>` credential only under `"LICENSE"` or
+ * `"MIXED"`; the column defaults to `"TOKEN"`, and `"NONE"` behaves the same
+ * way `"TOKEN"` does at this gate. Under either, every call made with
+ * `{ kind: "license", key }` comes back `401 LICENSE_NOT_ALLOWED` — a
+ * configuration precondition, not a retryable auth failure. See
+ * {@link import("../errors.js").LicenseNotAllowedError}.
  */
 export const AuthenticationStrategy = {
   TOKEN: "TOKEN",
   LICENSE: "LICENSE",
   MIXED: "MIXED",
+  NONE: "NONE",
 } as const;
 
 /** The `policies` JSON:API resource: `{ id, type, attributes }`. */
@@ -215,19 +249,39 @@ export interface PolicyAttributes {
   check_in_interval: CheckInInterval | null;
   /** Check-in cadence multiplier (e.g. `2` + `"week"` = every 2 weeks). */
   check_in_interval_count: number | null;
-  /** Whether machines under this policy must send heartbeats. */
+  /**
+   * Whether machines under this policy must send heartbeats. **Defaults to
+   * `false`**, and the server's cull job returns early for any policy where
+   * it is `false` — so on a default policy a machine that stops pinging
+   * stays in `heartbeat_status: "DEAD"` indefinitely (as a checked-out
+   * machine file will show, though a ping never will) and is never culled,
+   * deactivated or deleted. See {@link import("./machine.js").HeartbeatStatus}
+   * and {@link HeartbeatCullStrategy}.
+   */
   require_heartbeat: boolean;
   /**
-   * ⚠️ Declared here but **not actually driving the heartbeat window** — the
-   * server hardcodes 600s for machines / 30s for processes regardless of
-   * this value. See `src/models/machine.ts`'s `MACHINE_HEARTBEAT_WINDOW_MS`/
-   * `PROCESS_HEARTBEAT_WINDOW_MS`.
+   * The machine heartbeat window in **seconds**. This genuinely drives the
+   * window: the server uses it when set and falls back to 600s only when it
+   * is `null` (`Policy::effective_heartbeat_duration_secs`, and
+   * `COALESCE(p.heartbeat_duration, 600)` in the cull job's claim query).
+   *
+   * ⚠️ Two caveats. It does **not** affect processes — that window really is
+   * a hardcoded 30s regardless of this value (see
+   * `src/models/machine.ts`'s `PROCESS_HEARTBEAT_WINDOW_MS`). And there is no
+   * policy getter here, so `MACHINE_HEARTBEAT_WINDOW_MS` stays pinned to the
+   * 600s fallback and
+   * {@link import("../client.js").TamgaClient.startHeartbeat} does not adapt
+   * on its own — size the interval yourself when your policy sets this. You
+   * can recover the value without reading the policy: a checked-out machine
+   * file reports it as `next_heartbeat_at - last_heartbeat_at` (see
+   * {@link import("./machine.js").MachineAttributes.next_heartbeat_at}).
    */
   heartbeat_duration: number | null;
   /**
    * Raw wire string (not the typed {@link HeartbeatCullStrategy}) — unlike
    * `heartbeat_resurrection_strategy` this field has no documented
-   * invalid-default gotcha requiring lenient fallback parsing.
+   * invalid-default gotcha requiring lenient fallback parsing. ⚠️ Inert
+   * unless {@link require_heartbeat} is `true`.
    */
   heartbeat_cull_strategy: string;
   /**
@@ -284,4 +338,33 @@ export interface PolicyAttributes {
   created: string;
   /** Last-updated timestamp. */
   updated: string;
+}
+
+/**
+ * The machine heartbeat window this policy actually imposes, in milliseconds.
+ *
+ * Mirrors the server's `Policy::effective_heartbeat_duration_secs`
+ * (`tamga-api/src/features/policies/model.rs`) exactly: the policy's
+ * `heartbeat_duration` seconds when the column is set, and the
+ * {@link import("./machine.js").MACHINE_HEARTBEAT_WINDOW_MS} fallback (600 s)
+ * only when it is `null`. The cull job's claim query uses the same
+ * `COALESCE(p.heartbeat_duration, 600)`, so this is the number a machine is
+ * really judged against.
+ *
+ * ⚠️ This is the **window**, not a ping interval. Divide it — by
+ * {@link import("./machine.js").MACHINE_HEARTBEAT_INTERVAL_DIVISOR}, say — before
+ * handing it to a scheduler; pinging exactly on the window boundary loses the
+ * race every time the network is slow.
+ *
+ * The value is returned as the server reports it, including a non-positive
+ * `heartbeat_duration` if a policy somehow carries one. That is deliberate:
+ * this function's job is to say what the server will judge the machine on, and
+ * silently substituting a friendlier number here would hide a misconfigured
+ * policy rather than surface it.
+ */
+export function effectiveHeartbeatWindowMs(policy: Policy): number {
+  const seconds = policy.attributes.heartbeat_duration;
+  return typeof seconds === "number" && Number.isFinite(seconds)
+    ? seconds * 1000
+    : MACHINE_HEARTBEAT_WINDOW_MS;
 }

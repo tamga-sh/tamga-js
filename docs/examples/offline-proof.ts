@@ -5,6 +5,13 @@
  * "prove this machine is still valid" pings in air-gapped environments —
  * always RSA-2048 PKCS#1 v1.5 / SHA-256, regardless of the license's own
  * `scheme`.
+ *
+ * ⚠️ `generateOfflineProof` is role-gated server-side and always answers
+ * `403` for a license-key credential, so the minting half of this example
+ * needs an account-level token (bearer/product/environment). Verification is
+ * the half a shipped client runs: `verifyOfflineProof` needs no credential at
+ * all. In production, mint the proof in your backend and hand it to the
+ * client.
  */
 import { TamgaClient, verifyOfflineProof } from "@tamga/sdk";
 
@@ -25,7 +32,8 @@ const { machine, proof } = await client.generateOfflineProof(machineId, dataset)
 console.log(`Got proof token for machine ${machine.id}: ${proof}`);
 
 // Verification is fully offline — embed your account's RSA public key
-// (SubjectPublicKeyInfo DER) in the shipped application.
+// (PKCS#1 `RSAPublicKey` DER as the API publishes it, or SPKI — both are
+// accepted) in the shipped application.
 const rsaPublicKey = new Uint8Array(
   Buffer.from(process.env.TAMGA_RSA_PUBLIC_KEY_BASE64 ?? "", "base64"),
 );

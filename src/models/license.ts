@@ -74,11 +74,16 @@ export interface LicenseAttributes {
  * body. Every field is optional — omitted means "no constraint, skip this
  * check."
  *
- * Only `product`/`policy`/`user`/`environment` are enforced server-side
- * today (Tamga API protocol specification §2); `entitlements`/
- * `fingerprint`/`version`/`checksum` are parsed and silently ignored. Kept
- * here for forward-compatibility — do not advertise the latter 4 as
- * functioning constraints.
+ * Six of the eight fields are enforced server-side:
+ * `product`/`policy`/`user`/`environment`, plus `entitlements` and
+ * `fingerprint`.
+ *
+ * ⚠️ `version` and `checksum` are **not** inert. The server rejects a scope
+ * carrying either with `422 SCOPE_NOT_SUPPORTED`, failing the entire
+ * validate call — no `meta.valid` comes back at all. `validateById` strips
+ * both before sending so an existing caller degrades to a working validate
+ * rather than a hard failure, but they are deprecated and will be removed in
+ * the next minor release.
  */
 export interface LicenseScope {
   /** Enforced. Must match the license's product. */
@@ -89,13 +94,36 @@ export interface LicenseScope {
   user?: string;
   /** Enforced. Must match the license's environment. */
   environment?: string;
-  /** Not enforced server-side yet — parsed and ignored. */
+  /**
+   * **Enforced.** The license must hold every entitlement listed, whether
+   * attached directly or inherited from its policy.
+   *
+   * Takes entitlement **`code`s** — not the UUIDs the attach/detach bodies
+   * use. Compared case-insensitively and de-duplicated server-side. An empty
+   * array asserts nothing and always passes. A failure comes back as the
+   * `ENTITLEMENTS_MISSING` {@link
+   * import("./validation.js").ValidationCode}.
+   */
   entitlements?: string[];
-  /** Not enforced server-side yet — parsed and ignored. */
+  /**
+   * **Enforced.** Must match the fingerprint of *some* machine on this
+   * license — heartbeat state is irrelevant, and it need not be the machine
+   * the caller is running on. This is the anti-key-sharing check. A failure
+   * comes back as the `FINGERPRINT_SCOPE_MISMATCH` {@link
+   * import("./validation.js").ValidationCode}.
+   */
   fingerprint?: string;
-  /** Not enforced server-side yet — parsed and ignored. */
+  /**
+   * @deprecated Rejected server-side with `422 SCOPE_NOT_SUPPORTED`, which
+   * fails the whole validate call. Stripped before sending — see this
+   * interface's doc comment.
+   */
   version?: string;
-  /** Not enforced server-side yet — parsed and ignored. */
+  /**
+   * @deprecated Rejected server-side with `422 SCOPE_NOT_SUPPORTED`, which
+   * fails the whole validate call. Stripped before sending — see this
+   * interface's doc comment.
+   */
   checksum?: string;
 }
 
@@ -118,6 +146,22 @@ export interface EntitlementAttributes {
   name: string;
   /** The stable, developer-facing identifier. `hasEntitlement` matches on this, never `name`. */
   code: string;
+  /**
+   * `true` when the license holds this entitlement through its **policy**
+   * rather than directly.
+   *
+   * Two consequences worth coding against:
+   * - An inherited entitlement cannot be detached from the license.
+   * - `GET /licenses/{id}/entitlements/{eid}` resolves *direct* attachments
+   *   only, so
+   *   {@link import("../client.js").TamgaClient.getEntitlement} answers `404`
+   *   for one of these even though the list endpoint just returned it —
+   *   list-then-get-each is not a valid pattern on this resource.
+   *
+   * Only the license-scoped listing emits this field; account-, policy- and
+   * release-scoped entitlement responses omit it, hence optional.
+   */
+  inherited?: boolean;
   /** Arbitrary caller-set metadata. */
   metadata: Record<string, unknown>;
   /** Creation timestamp. */

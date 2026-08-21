@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { TamgaClient } from "../src/client.js";
+import { TamgaClient, MAX_PAGE_SIZE } from "../src/client.js";
 import { mockJsonApiResponse, lastCall } from "./helpers/mockFetch.js";
 
 afterEach(() => {
@@ -11,7 +11,7 @@ function client(): TamgaClient {
 }
 
 describe("TamgaClient.listEntitlements", () => {
-  it("sends limit and page[after] keyset pagination params", async () => {
+  it("sends limit but never page[after] — the server ignores the cursor on this route", async () => {
     const fetchMock = mockJsonApiResponse([
       { id: "e-1", type: "entitlements", attributes: { name: "Pro", code: "PRO" } },
     ]);
@@ -23,6 +23,27 @@ describe("TamgaClient.listEntitlements", () => {
     const [url] = lastCall(fetchMock);
     expect(url.pathname).toBe("/v1/accounts/acct_1/licenses/lic-1/entitlements");
     expect(url.searchParams.get("limit")).toBe("25");
-    expect(url.searchParams.get("page[after]")).toBe("e-0");
+    // Sending it would silently re-request page one forever: the listing is a
+    // union of direct and policy-inherited rows, so no single keyset cursor
+    // describes it and the server drops the parameter.
+    expect(url.searchParams.has("page[after]")).toBe(false);
+  });
+
+  it("sends the server maximum as limit when none is supplied, rather than letting it default to 25", async () => {
+    const fetchMock = mockJsonApiResponse([]);
+    await client().listEntitlements("lic-1");
+    const [url] = lastCall(fetchMock);
+    expect(url.searchParams.get("limit")).toBe(String(MAX_PAGE_SIZE));
+  });
+
+  it("surfaces the inherited flag on a policy-inherited entitlement", async () => {
+    mockJsonApiResponse([
+      { id: "e-1", type: "entitlements", attributes: { name: "Pro", code: "PRO", inherited: false } },
+      { id: "e-2", type: "entitlements", attributes: { name: "Beta", code: "BETA", inherited: true } },
+    ]);
+
+    const entitlements = await client().listEntitlements("lic-1");
+    expect(entitlements[0]?.attributes.inherited).toBe(false);
+    expect(entitlements[1]?.attributes.inherited).toBe(true);
   });
 });

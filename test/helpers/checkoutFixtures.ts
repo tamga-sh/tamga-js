@@ -1,9 +1,26 @@
 /**
- * Test-only fixture builders for `.lic`/`.mach` checkout files, built to
- * exactly mirror the real wire format documented in the Tamga API protocol
- * specification §4/§6 and ground-truthed against `tamga-rust`'s own test
- * fixture builders
- * (`src/checkout/license_file.rs`/`machine_file.rs` `#[cfg(test)]` modules).
+ * Test-only fixture builders for `.lic`/`.mach` checkout files.
+ *
+ * ⚠️ **SELF-GENERATED — NOT GROUND TRUTH.** Everything here is built by this
+ * repository, so it can only ever encode this repository's *belief* about the
+ * wire format. When that belief was wrong, these builders reproduced the error
+ * on the signing side and the suite stayed green over a verifier that could not
+ * open a single certificate the server had ever emitted. That is not a
+ * hypothetical: this file previously wrote `alg` without its mandatory `+v2`
+ * marker, concatenated an encrypted payload as `nonce‖ciphertext‖tag` instead
+ * of `"{nonce_b64}.{cipher_b64}"`, and signed ECDSA over the unhashed message —
+ * three defects, mirrored on both sides, invisible to CI.
+ *
+ * **The ground truth is `test/fixtures/machine-file-v2/`** — certificates
+ * produced by the server's own `encode_machine_file`, exercised by
+ * `test/machine-file-server-fixtures.spec.ts`. Anything asserting that this SDK
+ * can read what the server writes belongs there, not here.
+ *
+ * What remains legitimate here is the negative and structural space the server
+ * will not mint for you: a scheme it refuses outright, a caller/file mismatch,
+ * a key the file was not signed with. The builders below were corrected against
+ * the server source so those cases start from a *valid* file, but they are
+ * still not evidence of interop.
  *
  * Not part of the public API — used only by
  * `test/license-file-*.spec.ts`/`test/machine-file-*.spec.ts`.
@@ -11,6 +28,7 @@
 
 import { ed25519 } from "@noble/curves/ed25519";
 import { p256 } from "@noble/curves/nist";
+import { sha256 } from "@noble/hashes/sha2";
 import { base64Encode } from "../../src/internal/base64.js";
 import { getWebCrypto } from "../../src/internal/webcrypto.js";
 import { encryptAesGcm } from "../../src/crypto/aesGcm.js";
@@ -117,6 +135,26 @@ export async function buildLicensePem(
   return `-----BEGIN LICENSE FILE-----\n${pemBody}\n-----END LICENSE FILE-----`;
 }
 
+/**
+ * Wraps an arbitrary, caller-supplied `enc` string into a correctly **signed**
+ * machine file.
+ *
+ * For the structural failures the server will never mint: an encrypted payload
+ * with no `.` separator, a wrong-length nonce, a truncated ciphertext. The
+ * signature is genuine, so these reach the parsing that follows verification
+ * instead of being turned away at the signature.
+ */
+export async function buildSignedMachinePemFromEnc(
+  scheme: LicenseScheme,
+  encValue: string,
+  alg: string,
+): Promise<{ publicKey: Uint8Array; pem: string }> {
+  const { publicKey, signature } = await signForScheme(scheme, encValue);
+  const certJson = JSON.stringify({ enc: encValue, sig: base64Encode(signature), alg });
+  const pemBody = base64Encode(enc.encode(certJson));
+  return { publicKey, pem: `-----BEGIN MACHINE FILE-----\n${pemBody}\n-----END MACHINE FILE-----` };
+}
+
 /** Signs `encValue`'s UTF-8 string bytes with the scheme-appropriate key, returning raw signature bytes. */
 async function signForScheme(
   scheme: LicenseScheme,
@@ -155,9 +193,13 @@ async function signForScheme(
       return { publicKey, signature };
     }
     case "ECDSA_P256_SIGN": {
+      // ⚠️ `@noble/curves` takes a message DIGEST, not a message. The server
+      // signs `SHA-256(enc)` (`ECDSA_P256_SHA256_ASN1`); this used to pass
+      // `message` straight through, which round-tripped against a verifier
+      // making the identical mistake and matched nothing the server produces.
       const { secretKey } = p256.keygen();
       const publicKey = p256.getPublicKey(secretKey, false);
-      const signature = p256.sign(message, secretKey).toBytes("der");
+      const signature = p256.sign(sha256(message), secretKey).toBytes("der");
       return { publicKey, signature };
     }
     case "RSA_2048_JWT_RS256":
@@ -173,7 +215,14 @@ const SCHEME_ALG_SUFFIX: Record<LicenseScheme, string> = {
   RSA_2048_JWT_RS256: "rsa-sha256",
 };
 
-/** Builds a `.mach` PEM for `scheme`, returning `{ publicKey, pem }`. */
+/**
+ * Builds a `.mach` PEM for `scheme`, returning `{ publicKey, pem }`.
+ *
+ * Corrected against `tamga-api`'s `encode_machine_file`: `alg` carries the
+ * mandatory `+v2` marker, and an encrypted `enc` is `"{nonce_b64}.{cipher_b64}"`
+ * — two independently base64-encoded halves, per `FieldEncryption::encrypt`.
+ * Read the file header before trusting anything built here.
+ */
 export async function buildMachinePem(
   scheme: LicenseScheme,
   payloadJson: string,
@@ -186,15 +235,12 @@ export async function buildMachinePem(
     encPrefix = "base64";
   } else {
     const { nonce, ciphertextAndTag } = await encryptAesGcm(enc.encode(payloadJson), encryptionKey);
-    const combined = new Uint8Array(nonce.length + ciphertextAndTag.length);
-    combined.set(nonce, 0);
-    combined.set(ciphertextAndTag, nonce.length);
-    encValue = base64Encode(combined);
+    encValue = `${base64Encode(nonce)}.${base64Encode(ciphertextAndTag)}`;
     encPrefix = "aes-256-gcm";
   }
   const { publicKey, signature } = await signForScheme(scheme, encValue);
   const sig = base64Encode(signature);
-  const alg = `${encPrefix}+${SCHEME_ALG_SUFFIX[scheme]}`;
+  const alg = `${encPrefix}+${SCHEME_ALG_SUFFIX[scheme]}+v2`;
   const certJson = JSON.stringify({ enc: encValue, sig, alg });
   const pemBody = base64Encode(enc.encode(certJson));
   return { publicKey, pem: `-----BEGIN MACHINE FILE-----\n${pemBody}\n-----END MACHINE FILE-----` };

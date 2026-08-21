@@ -37,7 +37,7 @@ describe("TamgaClient.validateByKey", () => {
 });
 
 describe("TamgaClient.validateById", () => {
-  it("sends the full 8-field scope object and skip_touch: false by default", async () => {
+  it("sends the 6 enforceable scope fields, strips version/checksum, and defaults skip_touch to false", async () => {
     const fetchMock = mockJsonApiResponse(licenseFixture, {
       meta: { ts: "t", valid: true, detail: "ok", code: "VALID" },
     });
@@ -60,6 +60,9 @@ describe("TamgaClient.validateById", () => {
     expect(sentJsonBody(init)).toEqual({
       meta: {
         skip_touch: false,
+        // `version`/`checksum` are dropped: the server answers
+        // `422 SCOPE_NOT_SUPPORTED` to a scope carrying either and never runs
+        // the validation at all.
         scope: {
           product: "p1",
           policy: "pol1",
@@ -67,11 +70,20 @@ describe("TamgaClient.validateById", () => {
           environment: "e1",
           entitlements: ["ent1"],
           fingerprint: "fp1",
-          version: "1.0",
-          checksum: "chk1",
         },
       },
     });
+  });
+
+  it("still sends a scope object when version/checksum were its only members", async () => {
+    const fetchMock = mockJsonApiResponse(licenseFixture, {
+      meta: { ts: "t", valid: true, detail: "ok", code: "VALID" },
+    });
+
+    await client().validateById("lic-1", { scope: { version: "1.0", checksum: "chk1" } });
+
+    const [, init] = lastCall(fetchMock);
+    expect(sentJsonBody(init)).toEqual({ meta: { skip_touch: false, scope: {} } });
   });
 
   it("omits scope entirely when not supplied, and sends skip_touch: true when requested", async () => {

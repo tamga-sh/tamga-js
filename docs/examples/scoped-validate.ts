@@ -2,11 +2,18 @@
  * Node example: validate a license by ID with a full scope constraint.
  *
  * `validateById` calls `POST /licenses/{license_id}/actions/validate`.
- * Only `product`/`policy`/`user`/`environment` are enforced server-side
- * today (Tamga API protocol specification §2) — `entitlements`/
- * `fingerprint`/`version`/`checksum` are accepted and forwarded for
- * forward-compatibility but are currently parsed and silently ignored by
- * the server. Don't rely on them as functioning constraints yet.
+ *
+ * Six of the eight scope fields are enforced server-side:
+ * `product`/`policy`/`user`/`environment`, plus `entitlements` (entitlement
+ * **codes**, matched case-insensitively across both the license's direct
+ * attachments and the ones inherited from its policy) and `fingerprint`
+ * (matched against any machine on the license — the anti-key-sharing check).
+ *
+ * `version` and `checksum` are deprecated dead weight: the server answers
+ * `422 SCOPE_NOT_SUPPORTED` to a scope carrying either and never runs the
+ * validation at all. The SDK strips them before sending so an existing
+ * caller degrades to a working validate rather than a hard failure — but
+ * stop setting them.
  */
 import { TamgaClient } from "@tamga/sdk";
 
@@ -22,6 +29,13 @@ const { meta } = await client.validateById(licenseId, {
   scope: {
     product: process.env.TAMGA_PRODUCT_ID,
     environment: process.env.TAMGA_ENVIRONMENT_ID,
+    // Enforced: this license has to hold the PRO entitlement, directly or
+    // through its policy.
+    entitlements: ["PRO"],
+    // Enforced: binds the validation to a machine already activated on this
+    // license, so a shared key validated from an unregistered machine fails
+    // with FINGERPRINT_SCOPE_MISMATCH.
+    fingerprint: process.env.TAMGA_MACHINE_FINGERPRINT,
   },
   // Suppresses the last_validated_at side effect — useful for a
   // "just checking, not activating" probe that shouldn't count as real
@@ -35,6 +49,12 @@ switch (meta.code) {
   case "PRODUCT_SCOPE_MISMATCH":
   case "ENVIRONMENT_SCOPE_MISMATCH":
     console.log("This license isn't scoped to the product/environment you asked about.");
+    break;
+  case "ENTITLEMENTS_MISSING":
+    console.log("The license doesn't hold every entitlement code the scope asked for.");
+    break;
+  case "FINGERPRINT_SCOPE_MISMATCH":
+    console.log("No machine with that fingerprint is activated on this license.");
     break;
   case "TOO_MANY_MACHINES":
   case "TOO_MANY_CORES":

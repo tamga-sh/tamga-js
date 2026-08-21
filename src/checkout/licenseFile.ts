@@ -219,8 +219,14 @@ export interface VerifiedLicenseFile {
  * Deliberately small. The client's clock is under the attacker's control, so a
  * generous allowance is just a free extension on every expired file; this
  * covers ordinary NTP drift and nothing more.
+ *
+ * Exported so `src/checkout/machineFile.ts` enforces its own `meta.exp` with
+ * this exact value rather than a second copy. The two formats carry the same
+ * `LicenseFileClaims` and are issued by the same handler; if the constants ever
+ * drifted, one of the two file types would silently get a different grace
+ * period, and nothing in the build would notice.
  */
-const CLOCK_SKEW_TOLERANCE_SECONDS = 60;
+export const CLOCK_SKEW_TOLERANCE_SECONDS = 60;
 
 /**
  * As {@link verifyAndDecryptLicenseFile}, also returning the signed claims.
@@ -297,12 +303,18 @@ export async function verifyLicenseFileWithClaims(
   }
   // Second line behind the `alg` gate: a file must not reach the expiry check
   // with nothing to check.
-  if (!("meta" in payload) || typeof (payload as { meta?: unknown }).meta !== "object") {
+  // `typeof null === "object"` and so is an array, so neither extra check is
+  // redundant: without the null check a `"meta": null` payload reaches the
+  // expiry check and dies on a property access instead of returning a typed
+  // CheckoutError, and an array `meta` would read `claims.exp` as `undefined`
+  // and skip expiry enforcement silently.
+  const meta = (payload as { meta?: unknown }).meta;
+  if (typeof meta !== "object" || meta === null || Array.isArray(meta)) {
     throw CheckoutError.invalidJson(
       "payload is missing the signed 'meta' claims (this looks like a pre-v2 file)",
     );
   }
-  const claims = (payload as { meta: LicenseFileClaims }).meta;
+  const claims = meta as LicenseFileClaims;
 
   // The signature proves the file is authentic. It does not prove it is still
   // valid — that is this check, and skipping it is what made v1 files
