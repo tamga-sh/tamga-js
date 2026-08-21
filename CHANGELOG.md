@@ -1,5 +1,426 @@
 # @tamga/sdk
 
+## 0.3.4
+
+### Patch Changes
+
+- 4590698: Stop a hand-composed heartbeat from busy-looping the licensing server.
+
+  `startHeartbeatFromPolicy` already floored its computed interval at one second.
+  The primitives it is built from did not: `resolveHeartbeatWindowMs` returns the
+  policy's window verbatim, and `startHeartbeat(machineId, intervalMs)` handed
+  `intervalMs` straight to `setInterval`. Wiring the two together by hand — a
+  reasonable reading of two public methods that look designed to compose — could
+  therefore start a timer on a zero interval.
+
+  `heartbeat_duration` really can be zero or negative. The column carries no
+  `CHECK` constraint and `effective_heartbeat_duration_secs` returns whatever it
+  holds; only `NULL` takes the 600s fallback. And `setInterval` does not honour a
+  degenerate delay, it shortens it: `0`, a negative number, `NaN`, `Infinity` and
+  anything past the signed-32-bit ceiling all tick every 1 ms. The result is not
+  a crash but a silent spin — roughly a thousand `ping-heartbeat` requests a
+  second, from every machine running that code, each one individually valid and
+  correctly authenticated, so nothing looks wrong from either end.
+
+  `startHeartbeat` now confines `intervalMs` to `[1s, 2147483647ms]`, with a
+  non-finite value falling back to the floor. `startProcessHeartbeat` takes the
+  same guard — it wraps the same `setInterval` and spins the same way on an
+  explicit `0`, even though its 10s default is safe. `startHeartbeatFromPolicy`
+  now inherits the floor from the primitive rather than applying its own, so
+  there is one definition of it.
+
+  The clamp is a flat floor rather than a guard on only the values `setInterval`
+  refuses to honour, and that distinction was decided on measurement rather than
+  taste. The runtime rewrite is not what does the damage — the resulting rate is,
+  and `setInterval` honours `1` _exactly_: `0` ticks at 1.4 ms and `1` at 1.35 ms,
+  about 740 pings a second either way (`2` → 2.55 ms, `3` → 3.75 ms, all
+  honoured). A rule clamping `0` while passing `1` through would give two inputs
+  with identical observable behaviour opposite treatment, describing where a
+  number came from rather than what it does.
+
+  The cost is one behaviour change: an interval in `1..999` is retimed rather
+  than honoured, so a caller passing `500` now pings once a second instead of
+  twice. That cannot break a working consumer's licensing. `heartbeat_duration`
+  is an integer-**seconds** column, so the shortest window the server can express
+  is 1 s and a once-a-second ping is inside every policy that exists — the
+  retiming is invisible in the only dimension this SDK promises anything about.
+
+  Nothing legitimate is clamped: the server's heartbeat window is an
+  integer-seconds column, so a sub-second ping interval is never a real request.
+  `resolveHeartbeatWindowMs` and `effectiveHeartbeatWindowMs` are deliberately
+  _not_ floored — their job is to report what the server will judge the machine
+  on, and rounding a misconfigured policy up to something friendlier here would
+  hide it. Guarding at the scheduler keeps both properties.
+
+  The floor was then checked against the server's real liveness rule rather than
+  a paraphrase of it, because a 1 s ping against a 1 s window looks like a
+  boundary case. It is not. `heartbeat_status_within` compares
+  `(now - last_heartbeat_at).num_seconds() <= window_secs`, and chrono's
+  `num_seconds()` truncates to whole seconds — so a machine reads `DEAD` only
+  once its age reaches `window_secs + 1` seconds. Every window carries one free
+  second, and a 1 s window has 2 s of slack at a 1 s ping. What the floor does
+  cost is `MACHINE_HEARTBEAT_INTERVAL_DIVISOR`'s "two consecutive losses"
+  promise: `heartbeat_duration` 3 is the first window where floor and divisor
+  agree, 2 keeps one spare ping, 1 keeps none. A non-positive window is handled separately, and not by the floor at all:
+  `startHeartbeatFromPolicy` now substitutes the 600 s platform default before
+  dividing, landing on a 200 s interval rather than the 1 s the floor produced
+  from a raw `0`. Such a window is unsatisfiable at any ping rate — the cull job
+  claims rows with
+  `last_heartbeat_at < NOW() - make_interval(secs => COALESCE(p.heartbeat_duration, 600))`,
+  and `COALESCE` replaces only `NULL`, so a stored `0` reduces that to
+  `last_heartbeat_at < NOW()`, true for every machine that has ever pinged at
+  every instant. (The cull job and `heartbeat_status` disagree here: the status
+  comparison truncates, so a sub-second ping keeps a `0` window _reporting_
+  `ALIVE` while the SQL comparison still claims the row. Survival follows the cull
+  job.) Since no rate saves the row, the only thing a rate can change is what the
+  futility costs: 18 requests an hour instead of 3600, forever, from every machine
+  under that policy. It also lands on the right cadence for free if the policy is
+  later corrected. This substitutes a _rate_, not a _window_ —
+  `effectiveHeartbeatWindowMs` and `resolveHeartbeatWindowMs` still report `0`
+  verbatim, and hand-composing the primitives still yields the 1 s floor, because
+  `startHeartbeat` gets a bare number with no provenance. A table naming every window value pins the
+  interaction, which previously had to be re-derived from two constants in
+  different files.
+
+  Separately documented, because the SDK was recommending a route to the same
+  bug: `heartbeatWindowMsFromMachine` returns `number | undefined`, and
+  `undefined` is the _normal_ answer for a machine that has not been pinged yet
+  — every freshly activated one. The composition the docs suggested,
+  `heartbeatWindowMsFromMachine(m)! / 3`, is therefore `NaN` exactly when a
+  scheduler is starting up. Every site that recommends it now says to branch on
+  the `undefined` instead of asserting it away.
+
+  No exported declaration changed; the generated `.d.ts` differs only in JSDoc.
+
+- 24309a8: Fix offline machine-file verification, which could not open a certificate the
+  server had ever issued.
+
+  Five defects on one path, all found by testing against certificates minted by
+  the Tamga API's own encoder rather than by this SDK:
+
+  - **`alg` carries a mandatory `+v2` suffix.** The server emits
+    `base64+ed25519+v2` / `aes-256-gcm+rsa-pss-sha256+v2`, and this SDK split at
+    the first `+` and compared the whole remainder against the expected signing
+    suffix — so `"ed25519+v2" !== "ed25519"` rejected every real file. `alg` is
+    now cut at the **first** and **last** `+` (both the encoding prefix and two
+    signing suffixes contain hyphens), and the version marker is matched exactly:
+    a file without `+v2` is refused, as are `+v3` and `+v2junk`, which a
+    substring check would let through. A v1 file carried no `meta.exp` inside the
+    signed payload and derived its AES key by zero-padding the license key, so
+    accepting one silently reinstates both weaknesses. `alg` is not covered by
+    the signature, so this gate does not lean on signature validity.
+
+  - **An encrypted `enc` is `"<nonce_b64>.<cipher_b64>"`.** The two halves are
+    base64-encoded separately and the ciphertext half already carries the 16-byte
+    GCM tag. This SDK treated `enc` as one blob and sliced a nonce off the first
+    12 decoded bytes; because the strict base64 decoder rejects the `.`, every
+    encrypted file failed with "invalid base64" before decryption was attempted.
+    The halves are now decoded independently, still strictly after the signature
+    over `enc`'s string bytes has verified — the order is verify, split, decode,
+    decrypt, so no attacker-controlled byte reaches a decoder unauthenticated —
+    and the branch is on the encoding prefix from `alg`, not on whether a dot
+    happens to be present.
+
+  - **`meta.exp` is now enforced.** The signed payload is
+    `{"data": <Machine>, "meta": {iat, exp?, jti, kid}}` and nothing read it, so
+    an expired machine file verified forever. Expiry is checked with the
+    license-file path's own `CLOCK_SKEW_TOLERANCE_SECONDS` (60s, now shared
+    rather than duplicated) and an expired file throws the same
+    `CheckoutError` of kind `"expired"` a license file does, so a caller can tell
+    "fetch a fresh one" from "forged or corrupt". A missing `exp` is legitimate —
+    checkout without a `ttl` produces a file that genuinely never expires — and
+    is not an error. A payload with no signed `meta` at all is rejected.
+
+  - **RSA public keys are accepted in the encoding the API actually publishes.**
+    `aws-lc-rs` hands back a PKCS#1 `RSAPublicKey` DER, and that blob is what the
+    server stores and publishes; this SDK imported it as SPKI, which fails at
+    `importKey` with `Invalid keyData` before any signature is examined. Both
+    encodings are now accepted (`src/crypto/rsa.ts::toRsaSpki`), which fixes
+    `verifyRsaPkcs1`, `verifyRsaPss`, the RSA branches of machine-file
+    verification, and `verifyOfflineProof`.
+
+  - **ECDSA P-256 verification now hashes the message.** `@noble/curves` takes a
+    message _digest_; handing it raw bytes does not throw, it silently truncates
+    and verifies against the wrong value. The server signs `SHA-256(enc)`, so no
+    server-issued `ECDSA_P256_SIGN` machine file verified. The round trip looked
+    correct only because the test fixture builder made the identical mistake on
+    the signing side.
+
+  Additions: `verifyMachineFileWithClaims` returns the signed
+  `iat`/`exp`/`jti`/`kid` alongside the machine, mirroring
+  `verifyLicenseFileWithClaims`, which is now re-exported from the package
+  entrypoint along with the `LicenseFileClaims` / `VerifiedLicenseFile` /
+  `MachineFileClaims` / `VerifiedMachineFile` types.
+  `verifyAndDecryptMachineFile` takes an optional trailing `now` (Unix seconds)
+  so a caller can supply a trusted timestamp instead of the local clock, which
+  belongs to whoever holds the file. No existing signature, type or error kind
+  changed. `kid` is exposed but nothing selects a key by it yet — key rotation is
+  a separate change.
+
+  Also fixed: a `"meta": null` payload reached the license-file expiry check and
+  died on a property access instead of returning a typed `CheckoutError`; an
+  array `meta` would have read `exp` as `undefined` and skipped expiry
+  enforcement silently, so both formats now reject any `meta` that is not a plain
+  object; and `CheckoutError.expired`'s message said "license file" for both
+  formats.
+
+  Semver note: `verifyEcdsaP256` is an exported primitive whose behaviour
+  changes, so `patch` is a deliberate call rather than an oversight. The previous
+  behaviour verified against a truncation of the message instead of its SHA-256
+  digest, which never accepted a real server signature — it was fail-closed, not
+  a working contract, and there is nothing a caller could have built on it. An
+  external caller who pre-hashed as a workaround should stop doing so.
+
+  Testing: `test/fixtures/machine-file-v2/` holds 12 certificates produced by the
+  server's `encode_machine_file` — four signing schemes by three variants —
+  iterated from their manifest by `test/machine-file-server-fixtures.spec.ts`, so
+  a fixture added there needs no test edit. `scripts/smoke.mjs` re-runs the whole
+  set against the built output on Node, Deno and Bun. The self-generated builders
+  in `test/helpers/checkoutFixtures.ts` are corrected and marked as what they are:
+  they encode this SDK's belief about the wire format, which is exactly how these
+  defects stayed green in CI, and they are kept only for the negative cases the
+  server will not mint.
+
+- 309cacf: Reach the endpoints this SDK named but could not call.
+
+  Fourteen new `TamgaClient` methods, no existing signature changed. Each covers a
+  route that exists on the server and had no client-side path, and several close a
+  failure mode rather than adding convenience.
+
+  **Machine reads and update.** `getMachine`, `listMachines`,
+  `findMachineByFingerprint`, `updateMachine`. `getMachine` matters beyond
+  convenience: it is a **read**, so its query joins the policy — which makes it
+  the first route here whose `heartbeat_status` can genuinely report `DEAD`, and
+  whose `next_heartbeat_at` reflects the policy instead of the 600s fallback.
+  `updateMachine` cannot clear a field back to `null` (the server's statement is
+  `name = COALESCE($3, name)`, so an omitted field and an explicit `null` are the
+  same no-op) and its `cores`/`memory`/`disk` move the license's running totals,
+  so the megabytes-not-bytes rule applies there too.
+
+  ⚠️ `updateMachine` is also a **counterexample to the write-vs-read heartbeat
+  rule** this SDK documents elsewhere, and the docs are corrected accordingly. The
+  rule is about what a request does to `last_heartbeat_at`, not about whether it
+  writes at all: a write that _sets_ the column cannot report `"DEAD"`, because
+  the status is then derived from the timestamp it just wrote. `PATCH` touches
+  only the descriptive columns, so it still derives a status from whatever was
+  already there — and its `UPDATE … RETURNING` joins no policy, so it judges
+  against the 600s fallback rather than the policy's window. Under a 3600s policy
+  a machine last seen 700s ago reads `DEAD` from a patch and `ALIVE` from
+  `getMachine`; under a 60s policy the disagreement runs the other way. Do not
+  read heartbeat state off a patch response.
+
+  ⚠️ **Machine routes are not license-scoped.** `machine.read`, `machine.update`
+  and `machine.delete` are all in the license-key role's default permission set,
+  and no machine route applies the server's `require_license_scope` guard — so a
+  license key can read, patch and delete any machine in the account, not only its
+  own. This is an upstream issue; the SDK cannot fix it and does not describe that
+  surface as scoped.
+
+  ⚠️ **`listMachines` is offset-paginated and every other list here is keyset.**
+  It takes `page`/`size` and returns `{ items, page: { number, size, total,
+totalPages } }`; `listComponents` and `listMachineProcesses` take `limit`/`after`
+  and return a bare array. Sending the wrong style is silent in both directions —
+  a cursor at an offset route and a page number at a keyset route are both
+  ignored. This repo has already shipped that mistake once in the other direction,
+  modelling a working cursor for a route that ignores `page[after]` entirely.
+  `listMachines` also has no `filter[fingerprint]`: the only fingerprint lookup on
+  offer is `filter[q]`, an `ILIKE '%term%'` spanning `name`/`hostname`/
+  `fingerprint`, so `findMachineByFingerprint` searches and then re-checks the
+  field exactly. It takes `licenseId` as a required argument because the
+  `machines` resource does not serialize `license_id` — a machine found without
+  that filter cannot be shown to belong to the license the caller asked about.
+
+  **Idempotent re-activation.** `activateMachine` gains a trailing
+  `reuseExistingMachine` flag, off by default. The server reports re-registering a
+  known fingerprint as `409 FINGERPRINT_TAKEN` deliberately — its own comment
+  reads "already activated, carry on" — but the response does not name the machine
+  holding the fingerprint, so a restarting client had no way to actually carry on
+  short of persisting the machine id locally. With the flag set, the conflict
+  resolves to the existing machine and the call becomes idempotent: run it twice
+  and you get the same machine, the same verdict, and no second seat. The lookup
+  is confined to the license being activated and a miss re-throws, because
+  `machine_uniqueness_strategy` can be `UNIQUE_PER_POLICY` or
+  `UNIQUE_PER_ACCOUNT`, under which the conflicting machine belongs to a
+  _different_ license and this activation genuinely did not happen.
+  `ValidationResult` gains an optional `machine` reporting what the activation
+  resolved to, and `autoDeleteOnOverage` now only ever deletes a machine the call
+  created — never a reused one.
+
+  **License and policy reads.** `getLicense`, `getLicensePolicy`, `getPolicy`,
+  plus `resolveHeartbeatWindowMs` and `startHeartbeatFromPolicy`, which close the
+  loop on the policy-driven heartbeat window: one extra request at startup and the
+  scheduler stops guessing 600s at a policy that asked for 60. Sizing against the
+  fallback under a shorter policy window leaves the machine outside its window
+  between pings, which is what makes it cullable under `require_heartbeat`, with
+  nothing in a ping response to reveal it. `effectiveHeartbeatWindowMs(policy)`
+  and `heartbeatWindowMsFromMachine(machine)` are exported for callers scheduling
+  their own timers.
+
+  ⚠️ **`getPolicy` is unreachable with a license key.** `GET /policies/{id}`
+  requires the `policy.read` permission, which the license-key role's default set
+  does not hold, so it answers `403` whatever the policy's
+  `authentication_strategy` says. `getLicensePolicy` reaches the same resource
+  through `GET /licenses/{id}/policy`, which needs only `license.read` — that is
+  the one an embedded client should call.
+
+  ⚠️ **Neither license-scoped read is confined to the caller's own license.** The
+  server's `require_license_scope` guard is called by `validate`, `validate-key`
+  and `check-out`, but not by `GET /licenses/{id}` or `GET /licenses/{id}/policy`.
+  Since the license-key role holds `license.read` by default, a key can read any
+  license in the account through `getLicense`, and `attributes.key` comes back in
+  plaintext. This is a server-side issue reported upstream; the SDK cannot fix it
+  and this release does not describe those reads as safe.
+
+  **Process teardown.** `deleteProcess`, `listMachineProcesses`, and `dispose()`.
+  Nothing server-side reaps a stale process row — the reaper exists but the job
+  scheduler never dispatches it, and `max_processes` is only decremented by an
+  explicit delete — so a client that registers a process per launch and never
+  deletes one eventually gets `422 TOO_MANY_PROCESSES` on every start with no
+  client-side recovery. `dispose()` clears every timer the client started;
+  `startHeartbeat` and `startProcessHeartbeat` now register theirs, and the stop
+  functions they return deregister. A `setInterval` holds a Node process open, so
+  this is what a teardown path needs. It stops timers only, and deliberately
+  deletes nothing.
+
+  **Auto-update and health.** `checkForUpgrade` and `health`.
+
+  ⚠️ **`checkForUpgrade` returning `undefined` does not mean "you are up to
+  date".** `GET /releases/actions/upgrade` answers `204 No Content` in two
+  different situations and will not distinguish them: no release newer than the
+  version you sent exists, _and_ a newer release exists that this license is not
+  entitled to. The collapse is deliberate — a distinct refusal would leak "there
+  is a newer version and you cannot have it", which is exactly what the expiry
+  gate withholds. Word it to users as _no update is available to you_, never as
+  _you are on the latest version_: the second is a claim this endpoint cannot
+  support, and it is wrong precisely for the customers whose licence lapsed. A
+  suspended licence is the third outcome and is not collapsed — it throws
+  `ForbiddenError`, and an unknown `productId` is a `404` raised before the check
+  runs at all, which is worth distinguishing from the `204` because it means the
+  updater is pointed at the wrong product rather than that it is current.
+  `enforce_distribution_strategy` can also answer `401`/`403` for a `Licensed` or
+  `Closed` product reached without an adequate credential. Two more traps: leaving `constraint` unset is not "no
+  constraint" (the server substitutes a pessimistic `~{major}.{minor}.{patch}`, so
+  an updater on 1.2.0 is never offered 1.3.0), and `channel` is required by this
+  SDK even though the server allows omitting it, because omitting it drops the
+  channel predicate entirely and lets alpha and dev builds answer a production
+  updater.
+
+  `health()` is the only non-account-scoped route here, so the client keeps a
+  second transport rooted at the bare origin. It is also the only route exempt
+  from the server's `Host`-header check, which makes it the test that tells a
+  `TAMGA_ALLOWED_HOSTS` misconfiguration from a bad credential: if every other
+  call is returning `403 "The Host header does not match any configured host"` and
+  this one succeeds, the fault is the deployment's configuration, not the caller's
+  key.
+
+  **Not included.** `GET|PATCH /machines/{id}/group` and `.../owner` are left
+  out. They answer with `groups` and `users` resources — two entirely new resource
+  domains no Tamga SDK models, and `users` is camelCase besides — and setting
+  either requires a group or user id an embedded client has no way to enumerate.
+  They are an admin-console concern, and pulling two new resource models into a
+  machine-lifecycle release to reach them would be the wrong trade.
+
+  New exported types: `ListMachinesOptions`, `MachineSortField`, `SortOrder`,
+  `UpdateMachineOptions`, `UpgradeCheckOptions`, `OffsetPage`, `OffsetPageMeta`,
+  `Release`, `ReleaseAttributes`, `HealthStatus`, and the constant
+  `MACHINE_HEARTBEAT_INTERVAL_DIVISOR`. Note that `Release`'s attributes are
+  **camelCase** (`productId`), unlike every other resource in this API — modelled
+  as the server emits it rather than normalized.
+
+  Semver note: `patch` is deliberate and is the whole point. Every change here is
+  additive — the exported surface was diffed against the previous release's
+  generated `.d.ts`, with zero removals; the only two altered declarations are
+  `activateMachine`'s trailing optional parameter and `ValidationResult`'s new
+  optional property, both of which stay assignable to their previous shapes
+  (`test/additive-surface.spec.ts` proves it at compile time). Under 0.x
+  semantics a minor would be 0.4.0, which consumers pinned to `^0.3` would never
+  receive.
+
+- 7018c68: Align the SDK with the current tamga-api server contract.
+
+  Behaviour fixes: `activateMachine` now handles the create-time `422` limit
+  refusal (`NO_OVERAGE` policies) and normalizes its code onto the validate-time
+  `ValidationCode`, while keeping the existing create→validate→rollback path for
+  overage-permitting policies; `validateById` strips `scope.version` /
+  `scope.checksum`, which the server rejects with `422 SCOPE_NOT_SUPPORTED`,
+  failing the whole call; `listEntitlements` no longer sends the `page[after]`
+  cursor the server ignores on that route, and both list methods now send an
+  explicit `limit=100` instead of falling into the server's silent 25-row
+  default; `/actions/ping-heartbeat` and `/actions/reset-heartbeat` are now
+  retried after a `429` like the other idempotent actions; requests have a 45s
+  per-attempt deadline (`TamgaClientConfig.timeoutMs`, `0` disables it) where
+  they previously had none, and that deadline stays armed across the
+  response-body read rather than being released once headers arrive — `fetch`
+  resolves on headers alone, so a peer that stalls the body could otherwise hang
+  a call with no client-side ceiling.
+
+  Additions: typed subclasses for `MACHINE_LIMIT_EXCEEDED`,
+  `CORE_LIMIT_EXCEEDED`, `MEMORY_LIMIT_EXCEEDED`, `DISK_LIMIT_EXCEEDED`,
+  `TOO_MANY_PROCESSES`, `LICENSE_SUSPENDED`, `LICENSE_EXPIRED` and
+  `LICENSE_NOT_ALLOWED`; an optional `inherited` flag on `EntitlementAttributes`;
+  `ExpirationStrategy.REVOKE_ACCESS` and `AuthenticationStrategy.NONE`;
+  `MAX_PAGE_SIZE` and `DEFAULT_TIMEOUT_MS`.
+
+  Documentation corrections: auth **is** enforced server-side and license-key
+  auth requires the policy's `authentication_strategy` to be `LICENSE` or
+  `MIXED` (it defaults to `TOKEN`); machine `memory` / `disk` are megabytes, not
+  bytes; `scope.entitlements` and `scope.fingerprint` are genuinely enforced;
+  `quickValidate` does not record the validation when the request carries an
+  `Origin` header, which a browser always adds; `resetHeartbeat` and
+  `generateOfflineProof` are role-gated and always `403` under license-key auth;
+  the release/auto-update endpoint works and the earlier "it crashes" note was
+  wrong.
+
+  Also corrected: a machine's `heartbeat_status` of `"DEAD"` was documented
+  throughout as "the row was culled — re-activate instead of pinging". Both
+  halves of that are wrong. No response built off a row the request just wrote can
+  report `DEAD` — `pingHeartbeat` writes `last_heartbeat_at = NOW()` and then
+  derives the status from that same timestamp, so it answers `ALIVE` or
+  `RESURRECTED`; `resetHeartbeat` nulls the column (`NOT_STARTED`);
+  `createMachine` never sets it (`NOT_STARTED`); and validate never emits
+  `HEARTBEAT_DEAD`. Read-backed responses do carry it: machine checkout and
+  offline-proof both resolve the machine through a lookup that joins the policy,
+  so the `Machine` returned by `verifyAndDecryptMachineFile`, and the `machine`
+  half of `generateOfflineProof`, carry a genuine staleness verdict that may be
+  `DEAD`. Branch on it there if useful; never on a ping response, where it cannot
+  appear. And `DEAD` does not mean the row was culled: the cull job runs
+  exclusively for policies with
+  `require_heartbeat = true`, which defaults to `false`, so under a default policy
+  no row is ever culled and a machine stays `DEAD` indefinitely with its row and
+  its seat intact — and a ping revives it regardless (bare
+  `last_heartbeat_at = now`, no resurrection check). What remains is the positive
+  rule: a heartbeat scheduler must not stop on **any** status, and `startHeartbeat`
+  does not — it discards the response entirely. The only terminal signal is a
+  `404 NOT_FOUND` (`NotFoundError`) from the ping, meaning the row is gone, which
+  is where re-activation belongs. Docs, JSDoc and
+  `docs/examples/machine-heartbeat.ts` (whose dead `DEAD` branch is gone) are
+  updated accordingly, and the scheduler has a regression test proving the timer
+  survives three consecutive unexpected statuses.
+
+  `ValidationCode`'s own doc is brought in line with the enforced scope fields:
+  `ENTITLEMENTS_MISSING` and `FINGERPRINT_SCOPE_MISMATCH` move out of the
+  "modeled but not reachable" group, so the reachable count goes from 14 to 16
+  (and the unreachable one from ten to eight) in `src/models/validation.ts`,
+  `README.md` and `CLAUDE.md`. The union itself is unchanged — all 24 literals
+  plus the `string & {}` escape hatch are still there.
+
+  Finally, the machine heartbeat window was documented throughout as a hardcoded
+  600s that `policy.heartbeat_duration` does not drive. It is the opposite: the
+  server uses `heartbeat_duration` seconds when that column is set and falls back
+  to 600s only when it is null (`Policy::effective_heartbeat_duration_secs`, and
+  `COALESCE(p.heartbeat_duration, 600)` in the cull job's claim query).
+  `MACHINE_HEARTBEAT_WINDOW_MS` is now documented as the 600s **fallback** and
+  `startHeartbeat` as a scheduler you size yourself: dividing the constant is safe
+  only while `heartbeat_duration` is unset. The real value is recoverable without
+  a policy getter — on a read-backed machine (`verifyAndDecryptMachineFile`, or
+  `generateOfflineProof`'s `machine`, whose queries join the policy)
+  `next_heartbeat_at - last_heartbeat_at` **is** the effective window, and
+  `MachineAttributes.next_heartbeat_at` now documents that recipe with its three
+  caveats: not from a ping response (no policy join there, so it always reads
+  `+600s`), `null` until the machine has been pinged once, and a snapshot from
+  issue time. Learn the window out of band only when no machine file is
+  available. The 30s process window really is hardcoded and is unchanged.
+
 ## 0.3.3
 
 ### Patch Changes
