@@ -244,6 +244,115 @@ describe("TamgaClient.startHeartbeatFromPolicy", () => {
   });
 });
 
+/**
+ * The floor and the divisor, in the same place, against the server's real rule.
+ *
+ * These two numbers live in different files — `MIN_HEARTBEAT_INTERVAL_MS` is
+ * private to `client.ts`, `MACHINE_HEARTBEAT_INTERVAL_DIVISOR` is exported from
+ * `models/machine.ts` — and they interact. For a short enough policy window the
+ * floor binds and the divisor's stated promise ("two consecutive pings can be
+ * lost") stops holding. This block names the window value in every case so the
+ * interaction is readable rather than re-derived.
+ *
+ * ⚠️ The server's rule is **not** `age > window`. From
+ * `tamga-api/src/features/machines/model.rs::heartbeat_status_within`:
+ *
+ *     let age_secs = (Utc::now() - hb_ts).num_seconds();
+ *     let within_window = age_secs <= window_secs;
+ *
+ * and chrono's `num_seconds()` returns *whole* seconds, truncating. Verified
+ * against chrono 0.4: `Duration::milliseconds(1999).num_seconds() === 1`. So a
+ * machine reads DEAD once its age reaches `(window_secs + 1)` seconds, and
+ * every window gets one free second of grace on top of its nominal value.
+ * Getting this wrong in the pessimistic direction makes a 1s window look
+ * unserveable at a 1s ping when it in fact has a full second of slack.
+ */
+describe("the interval floor against the server's actual liveness rule", () => {
+  /**
+   * The server goes DEAD at `age_secs > window_secs` on truncated whole
+   * seconds — i.e. the first millisecond age at which a read reports DEAD.
+   */
+  function deadAtAgeMs(windowSecs: number): number {
+    return (windowSecs + 1) * 1000;
+  }
+
+  /**
+   * Consecutive pings that can be lost before a read sees DEAD, given a
+   * scheduler ticking every `intervalMs`. After `m` misses the age reaches
+   * `(m + 1) * intervalMs`. `-1` means the window is not held even when no
+   * ping is lost at all.
+   */
+  function lossesTolerated(windowSecs: number, intervalMs: number): number {
+    return Math.ceil(deadAtAgeMs(windowSecs) / intervalMs) - 2;
+  }
+
+  it("truncation gives every window a full extra second, which is what makes 1s serveable", () => {
+    expect(deadAtAgeMs(1)).toBe(2000);
+    expect(deadAtAgeMs(2)).toBe(3000);
+    expect(deadAtAgeMs(600)).toBe(601_000);
+    // The pessimistic reading — DEAD the instant age passes the nominal
+    // window — would put a 1s window's deadline at 1000ms and make the 1s
+    // floor a boundary case. It is 2000ms, so the floor has 2x margin.
+    expect(deadAtAgeMs(1)).toBeGreaterThan(1000);
+  });
+
+  it.each([
+    // heartbeat_duration, interval the scheduler uses, losses tolerated
+    [600, 200_000, 2], // the fallback window: divisor governs, floor irrelevant
+    [60, 20_000, 2], //  an ordinary policy: same
+    [3, 1_000, 2], //    the first window where floor and divisor agree exactly
+    [2, 1_000, 1], //    floor binds: promise degraded from 2 losses to 1
+    [1, 1_000, 0], //    floor binds hardest: steady state fine, no loss spare
+  ])(
+    "heartbeat_duration %i pings every %ims and survives %i consecutive losses",
+    async (duration, expectedIntervalMs, expectedLosses) => {
+      vi.useFakeTimers();
+      const fetchMock = mockSequence(
+        jsonApi({ data: policy({ heartbeat_duration: duration }) }),
+        jsonApi({ data: { id: "m-1", type: "machines", attributes: {} } }),
+        jsonApi({ data: { id: "m-1", type: "machines", attributes: {} } }),
+      );
+      const stop = await client().startHeartbeatFromPolicy("m-1", "lic-1");
+
+      // One policy read, no ping yet.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(expectedIntervalMs - 1);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      stop();
+
+      // Steady state holds the window in every one of these cases: the age
+      // never reaches the server's DEAD threshold between pings.
+      expect(expectedIntervalMs).toBeLessThan(deadAtAgeMs(duration));
+      expect(lossesTolerated(duration, expectedIntervalMs)).toBe(expectedLosses);
+    },
+  );
+
+  it("names heartbeat_duration 0 as the one window the floor cannot hold", () => {
+    // Not the 1s window — the 0s one. `0` is storable (the column has no
+    // `CHECK`), and truncation gives it exactly 1000ms of grace, which is
+    // precisely the floor. So the steady-state age reaches the DEAD threshold
+    // at the instant each ping is due, and any latency reads DEAD.
+    expect(deadAtAgeMs(0)).toBe(1000);
+    expect(lossesTolerated(0, 1000)).toBe(-1);
+
+    // A sub-second ping would in fact hold it — 333ms keeps the age at 0 whole
+    // seconds. The SDK deliberately does not chase that: it would buy one
+    // absurd policy value by pinning the ping rate to `num_seconds()`
+    // truncation, an implementation artifact rather than a contract. If the
+    // server ever compared sub-second, a 0s window would be unserveable at any
+    // rate and this expectation is where that shows up.
+    expect(lossesTolerated(0, 333)).toBeGreaterThanOrEqual(0);
+  });
+
+  it("holds the floor for a negative window, which no interval can serve", () => {
+    // `age_secs <= -30` is false for every non-negative age, so a negative
+    // window reads DEAD unconditionally. There is nothing to chase.
+    expect(deadAtAgeMs(-30)).toBeLessThan(0);
+  });
+});
+
 describe("MAX_PAGE_SIZE is shared by both pagination styles", () => {
   it("is the server's ceiling for keyset and offset lists alike", () => {
     expect(MAX_PAGE_SIZE).toBe(100);

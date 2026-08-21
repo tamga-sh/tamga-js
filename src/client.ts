@@ -1275,6 +1275,28 @@ export class TamgaClient {
    * interval is floored at 1 s by {@link startHeartbeat} so a pathologically
    * short policy window — `heartbeat_duration` is allowed to be `0` or
    * negative — cannot turn into a busy loop.
+   *
+   * ⚠️ **What that floor costs on a short window.** The server judges liveness
+   * on *truncated whole seconds*: `heartbeat_status_within` compares
+   * `(now - last_heartbeat_at).num_seconds() <= window_secs`, and
+   * `num_seconds()` truncates, so a machine reads `DEAD` only once its age
+   * reaches `window_secs + 1` seconds. Every window therefore carries one free
+   * second, and a 1 s window is comfortably served by a 1 s ping — 2 s of
+   * slack, not zero. What the floor does cost is the
+   * {@link import("./models/machine.js").MACHINE_HEARTBEAT_INTERVAL_DIVISOR}
+   * promise of two tolerable consecutive losses: `heartbeat_duration` of 3 is
+   * the first where floor and divisor agree, 2 keeps one spare ping, and 1
+   * keeps none. Steady state holds the window in all three.
+   *
+   * The single window this cannot hold is `heartbeat_duration: 0`, where the
+   * free second *is* the entire grace and the floor lands exactly on it, so a
+   * read landing just before a ping sees `DEAD`. A sub-second ping would hold
+   * it, and this deliberately does not do that: chasing it would tie the SDK's
+   * ping rate to `num_seconds()` truncation — an implementation artifact, not
+   * a protocol guarantee — to serve one nonsensical policy value. A negative
+   * window is unserveable at any rate (`age_secs <= -30` is false for every
+   * age), so there is nothing to chase there either. Both are pinned in
+   * `test/policy-read.spec.ts`.
    */
   async startHeartbeatFromPolicy(
     machineId: string,

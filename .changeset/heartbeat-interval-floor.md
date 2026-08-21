@@ -50,6 +50,22 @@ integer-seconds column, so a sub-second ping interval is never a real request.
 on, and rounding a misconfigured policy up to something friendlier here would
 hide it. Guarding at the scheduler keeps both properties.
 
+The floor was then checked against the server's real liveness rule rather than
+a paraphrase of it, because a 1 s ping against a 1 s window looks like a
+boundary case. It is not. `heartbeat_status_within` compares
+`(now - last_heartbeat_at).num_seconds() <= window_secs`, and chrono's
+`num_seconds()` truncates to whole seconds — so a machine reads `DEAD` only
+once its age reaches `window_secs + 1` seconds. Every window carries one free
+second, and a 1 s window has 2 s of slack at a 1 s ping. What the floor does
+cost is `MACHINE_HEARTBEAT_INTERVAL_DIVISOR`'s "two consecutive losses"
+promise: `heartbeat_duration` 3 is the first window where floor and divisor
+agree, 2 keeps one spare ping, 1 keeps none. The only window the floor cannot
+hold is `0`, whose entire grace is that free second; chasing it with a
+sub-second ping would tie the SDK's rate to a truncation artifact rather than a
+protocol guarantee, so it does not. A table naming every window value pins the
+interaction, which previously had to be re-derived from two constants in
+different files.
+
 Separately documented, because the SDK was recommending a route to the same
 bug: `heartbeatWindowMsFromMachine` returns `number | undefined`, and
 `undefined` is the *normal* answer for a machine that has not been pinged yet

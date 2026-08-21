@@ -529,8 +529,25 @@ Things this SDK deliberately does not do, or cannot do yet.
   would give two inputs with identical behaviour opposite treatment. The floor
   costs nothing a policy can ask for: `heartbeat_duration` is an
   integer-**seconds** column, so the shortest expressible window is 1s and a
-  once-a-second ping is inside every policy that exists. The 30s **process**
-  window is genuinely hardcoded server-side and needs no such care.
+  once-a-second ping is inside every policy that exists.
+
+  ⚠️ **The server judges liveness on truncated whole seconds**, which is easy
+  to get wrong in the pessimistic direction. `heartbeat_status_within` compares
+  `(now - last_heartbeat_at).num_seconds() <= window_secs`, and chrono's
+  `num_seconds()` truncates — so a machine reads `DEAD` only once its age
+  reaches `window_secs + 1` seconds. Every window carries one free second on
+  top of its nominal value. A 1s window is therefore served comfortably by a 1s
+  ping (2s of slack, not zero), which is what makes the flat floor safe on short
+  windows. What the floor *does* cost is the `MACHINE_HEARTBEAT_INTERVAL_DIVISOR`
+  promise of two tolerable consecutive losses: `heartbeat_duration` of 3 is the
+  first window where floor and divisor agree, 2 keeps one spare ping, 1 keeps
+  none. The only window the floor cannot hold is `0` — its whole grace is that
+  free second, and the floor lands exactly on it. The SDK does not chase that
+  with a sub-second ping, because doing so would tie the ping rate to a
+  truncation artifact rather than a protocol guarantee. A negative window is
+  unserveable at any rate. The interaction table is pinned in
+  `test/policy-read.spec.ts`. The 30s **process** window is genuinely hardcoded
+  server-side and needs no such care.
 - **Eight of the 24 `ValidationCode` values are not reachable today.** They are
   modelled for forward-compatibility (`src/models/validation.ts`); do not write
   logic that depends on receiving one. `ENTITLEMENTS_MISSING` and

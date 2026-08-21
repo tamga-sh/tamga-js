@@ -251,6 +251,18 @@ export function toPidString(pid: string | number): string {
  * so a caller sizing its own timer off
  * {@link heartbeatWindowMsFromMachine} reaches the same number.
  *
+ * ⚠️ **The "two losses" promise does not survive the 1 s interval floor on a
+ * window shorter than 3 s.** For `heartbeat_duration` of 3 the floor and this
+ * divisor agree exactly (3 s / 3 = 1 s); below that the floor binds and the
+ * tolerance degrades — a 2 s window gets one spare ping, a 1 s window none.
+ * Steady state still holds the window in both cases, because the server judges
+ * on *truncated whole seconds* (`heartbeat_status_within` compares
+ * `(now - last).num_seconds() <= window_secs`, and `num_seconds()` truncates),
+ * so a machine reads DEAD only once its age reaches `window_secs + 1` seconds.
+ * That extra second is what makes a 1 s window serveable at a 1 s ping at all.
+ * The one window the floor cannot hold is `0`, whose whole grace *is* that
+ * second. See the interaction table in `test/policy-read.spec.ts`.
+ *
  * ⚠️ Dividing by this is where the recommended composition goes wrong.
  * `heartbeatWindowMsFromMachine` returns `number | undefined`, so
  * `heartbeatWindowMsFromMachine(m)! / MACHINE_HEARTBEAT_INTERVAL_DIVISOR` —
