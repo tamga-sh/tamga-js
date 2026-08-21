@@ -556,9 +556,19 @@ export class TamgaClient {
 
   /**
    * Starts a `pingHeartbeat` timer for `machineId`, pinging every
-   * `intervalMs`. Pick an interval well inside the hardcoded 600s window
-   * (e.g. a third of it) — see `src/models/machine.ts`'s
-   * `MACHINE_HEARTBEAT_WINDOW_MS`. Returns a stop function.
+   * `intervalMs`. Pick an interval well inside the heartbeat window (e.g. a
+   * third of it). Returns a stop function.
+   *
+   * ⚠️ **You have to size `intervalMs` yourself, and 600s is only a
+   * fallback.** The server's window is `policy.heartbeat_duration` seconds
+   * when that column is set, and 600s (10 min) only when it is null. This
+   * client has no policy or machine getter, so it cannot read the effective
+   * window and this scheduler never adapts to it: `MACHINE_HEARTBEAT_WINDOW_MS`
+   * is the 600s fallback, safe to divide only while `heartbeat_duration` is
+   * unset. Under a policy with a shorter duration an interval picked against
+   * 600s is too slow and the machine reads `DEAD` between pings — obtain your
+   * real window out of band (from whoever configures the policy) and pass a
+   * correspondingly shorter `intervalMs`.
    *
    * ⚠️ **Never stop this timer because `heartbeat_status` reads `"DEAD"`.**
    * `DEAD` means only that the last ping is older than the window — not that

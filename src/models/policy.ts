@@ -257,10 +257,18 @@ export interface PolicyAttributes {
    */
   require_heartbeat: boolean;
   /**
-   * ⚠️ Declared here but **not actually driving the heartbeat window** — the
-   * server hardcodes 600s for machines / 30s for processes regardless of
-   * this value. See `src/models/machine.ts`'s `MACHINE_HEARTBEAT_WINDOW_MS`/
-   * `PROCESS_HEARTBEAT_WINDOW_MS`.
+   * The machine heartbeat window in **seconds**. This genuinely drives the
+   * window: the server uses it when set and falls back to 600s only when it
+   * is `null` (`Policy::effective_heartbeat_duration_secs`, and
+   * `COALESCE(p.heartbeat_duration, 600)` in the cull job's claim query).
+   *
+   * ⚠️ Two caveats. It does **not** affect processes — that window really is
+   * a hardcoded 30s regardless of this value (see
+   * `src/models/machine.ts`'s `PROCESS_HEARTBEAT_WINDOW_MS`). And this SDK
+   * cannot read it: there is no policy getter here, so
+   * `MACHINE_HEARTBEAT_WINDOW_MS` stays pinned to the 600s fallback and
+   * {@link import("../client.js").TamgaClient.startHeartbeat} never adapts —
+   * size the interval yourself when your policy sets this.
    */
   heartbeat_duration: number | null;
   /**

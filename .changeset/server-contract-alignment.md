@@ -36,7 +36,7 @@ wrong.
 
 Also corrected: a machine's `heartbeat_status` of `"DEAD"` was documented
 throughout as "the row was culled — re-activate instead of pinging". That is
-wrong. `DEAD` means only that the last ping is older than the hardcoded 600s
+wrong. `DEAD` means only that the last ping is older than the heartbeat
 window: the server's cull job runs exclusively for policies with
 `require_heartbeat = true`, which defaults to `false`, so under a default
 policy no row is ever culled and a machine reports `DEAD` indefinitely with
@@ -55,3 +55,15 @@ proving it keeps pinging across three consecutive `DEAD` responses.
 (and the unreachable one from ten to eight) in `src/models/validation.ts`,
 `README.md` and `CLAUDE.md`. The union itself is unchanged — all 24 literals
 plus the `string & {}` escape hatch are still there.
+
+Finally, the machine heartbeat window was documented throughout as a hardcoded
+600s that `policy.heartbeat_duration` does not drive. It is the opposite: the
+server uses `heartbeat_duration` seconds when that column is set and falls back
+to 600s only when it is null (`Policy::effective_heartbeat_duration_secs`, and
+`COALESCE(p.heartbeat_duration, 600)` in the cull job's claim query). Since this
+SDK has no policy or machine getter, it cannot read the effective window, so
+`MACHINE_HEARTBEAT_WINDOW_MS` is now documented as the 600s **fallback** and
+`startHeartbeat` as a scheduler you size yourself: dividing the constant is safe
+only while `heartbeat_duration` is unset, and under a policy that sets it lower
+you must learn your window out of band and pass a shorter `intervalMs`. The 30s
+process window really is hardcoded and is unchanged.

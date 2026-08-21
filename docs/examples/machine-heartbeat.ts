@@ -2,10 +2,13 @@
  * Node example: create a machine, start a heartbeat scheduler, and handle
  * DEAD/RESURRECTED transitions.
  *
- * The heartbeat window is a hardcoded 600s (10 min) server-side — NOT
- * driven by `policy.heartbeat_duration` despite that field existing.
- * `startHeartbeat` here pings every 3 minutes (a third of the window), a
- * safe margin against network jitter.
+ * The heartbeat window is `policy.heartbeat_duration` seconds when that
+ * column is set, and 600s (10 min) only when it is null. This SDK cannot
+ * read it back — there is no policy getter — so MACHINE_HEARTBEAT_WINDOW_MS
+ * is that 600s fallback and `startHeartbeat` never adapts. The 3-minute
+ * interval below (a third of the fallback, a safe margin against network
+ * jitter) is therefore correct only while `heartbeat_duration` is unset: if
+ * your policy sets it, find that value out of band and divide it instead.
  *
  * ⚠️ DEAD is not a terminal state and does not mean the machine was culled.
  * It means only that the last ping is older than the window. Culling runs

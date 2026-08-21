@@ -339,8 +339,8 @@ Things this SDK deliberately does not do, or cannot do yet.
   roughly a million and gets the next activation on that license refused with
   `MEMORY_LIMIT_EXCEEDED`.
 - **`heartbeat_status: "DEAD"` does not mean the machine was culled.** It
-  means one thing only: the last ping is older than the hardcoded 600s
-  window. The server's cull job runs exclusively for policies with
+  means one thing only: the last ping is older than the heartbeat window.
+  The server's cull job runs exclusively for policies with
   `require_heartbeat = true`, and that column **defaults to `false`** — so
   under a default policy no machine row is ever culled, and a machine that
   stops pinging reports `DEAD` indefinitely with its row and its seat intact.
@@ -354,6 +354,20 @@ Things this SDK deliberately does not do, or cannot do yet.
   itself; hang re-activation off that. `startHeartbeat` swallows every ping
   failure, that 404 included, so a client that must react to deletion should
   drive `pingHeartbeat` on its own timer and catch `NotFoundError`.
+- **The heartbeat window is policy-driven, and this SDK cannot read it.** The
+  server uses `policy.heartbeat_duration` seconds when that column is set, and
+  falls back to 600s (10 min) only when it is null
+  (`Policy::effective_heartbeat_duration_secs`; the cull job's claim query uses
+  `COALESCE(p.heartbeat_duration, 600)`). There is no `getPolicy` / `getMachine`
+  method here, so nothing in this SDK discovers that value:
+  `MACHINE_HEARTBEAT_WINDOW_MS` is the **600s fallback**, not a reading of your
+  policy, and `startHeartbeat` never adapts to a shorter one. Dividing the
+  constant is therefore only safe while `heartbeat_duration` is unset — under a
+  policy that sets it lower, an interval sized against 600s is too slow and the
+  machine will read `DEAD` between pings. Learn your real window out of band
+  (from whoever configures the policy) and pass a correspondingly shorter
+  `intervalMs`. The 30s **process** window is genuinely hardcoded server-side
+  and needs no such care.
 - **Eight of the 24 `ValidationCode` values are not reachable today.** They are
   modelled for forward-compatibility (`src/models/validation.ts`); do not write
   logic that depends on receiving one. `ENTITLEMENTS_MISSING` and

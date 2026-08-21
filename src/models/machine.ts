@@ -58,9 +58,15 @@ export interface MachineAttributes {
  * (pinged within window) → `DEAD` (window elapsed) → `RESURRECTED` (new
  * ping arrived after a death event was already recorded).
  *
- * ⚠️ The window is a **hardcoded 600s (10 min)**, NOT driven by
- * `policy.heartbeat_duration` despite that field existing on the policy
- * resource.
+ * ⚠️ The window is **policy-driven, and this SDK cannot read it**. The server
+ * uses `policy.heartbeat_duration` seconds when that column is set and falls
+ * back to 600s (10 min) only when it is null
+ * (`Policy::effective_heartbeat_duration_secs`; the cull job's claim query
+ * uses `COALESCE(p.heartbeat_duration, 600)`). This SDK exposes no policy or
+ * machine read, so nothing here discovers the effective value —
+ * {@link MACHINE_HEARTBEAT_WINDOW_MS} is that 600s fallback, not a reading of
+ * your policy. On a policy with a shorter `heartbeat_duration` you must learn
+ * the real window out of band and size your own ping interval against it.
  *
  * ⚠️ **`DEAD` does not mean the machine was culled.** It means one thing
  * only: the last ping is older than that window. The row is still there, the
@@ -84,7 +90,17 @@ export interface MachineAttributes {
  */
 export type HeartbeatStatus = "NOT_STARTED" | "ALIVE" | "DEAD" | "RESURRECTED" | (string & {});
 
-/** Hardcoded machine heartbeat window, in milliseconds — see {@link HeartbeatStatus}. */
+/**
+ * The server's **fallback** machine heartbeat window, in milliseconds — the
+ * value it uses when `policy.heartbeat_duration` is null.
+ *
+ * ⚠️ Not necessarily *your* window. A policy that sets `heartbeat_duration`
+ * gets that value instead, and this SDK has no way to read it back (there is
+ * no policy or machine getter here), so this constant cannot adapt. Treat it
+ * as a default to size {@link import("../client.js").TamgaClient.startHeartbeat}
+ * against only while `heartbeat_duration` is unset; otherwise pass an interval
+ * derived from your own policy's value. See {@link HeartbeatStatus}.
+ */
 export const MACHINE_HEARTBEAT_WINDOW_MS = 600_000;
 
 /** Hardcoded process heartbeat window, in milliseconds — see {@link ProcessAttributes}. */

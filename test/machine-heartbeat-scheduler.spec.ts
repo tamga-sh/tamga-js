@@ -64,8 +64,8 @@ describe("TamgaClient.startHeartbeat", () => {
   });
 
   it("keeps pinging across three consecutive DEAD responses", async () => {
-    // Regression guard. `DEAD` means only "last ping older than the 600s
-    // window" — the row is NOT culled (culling needs a policy with
+    // Regression guard. `DEAD` means only "last ping older than the
+    // heartbeat window" — the row is NOT culled (culling needs a policy with
     // `require_heartbeat = true`, which is not the default) and the very
     // ping that reports `DEAD` already revived the machine. A scheduler
     // that stopped, cleared itself or short-circuited here would abandon a
