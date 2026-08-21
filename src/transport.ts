@@ -47,8 +47,6 @@
  * Explicitly out of scope:
  * - `Tamga-Environment` request header — planned EE feature, no server code
  *   path reads it yet.
- * - `X-RateLimit-*` response headers — not set by any server handler, so
- *   `Retry-After` on a 429 is the only rate-limit signal available to read.
  * - Any `User-Agent` requirement — no server-side check exists. (Also: this
  *   SDK does not set a custom `User-Agent` header at all — `fetch`
  *   implementations in browsers refuse to let script set it, and Node/
@@ -162,6 +160,43 @@ export interface ResponseInfo {
   tamgaMode?: string;
   /** Useful to log for support — correlates a client-side error with server-side logs. */
   requestId?: string;
+  /**
+   * The `x-ratelimit-*` budget, when the server sent it. See
+   * {@link RateLimitInfo} — and note that an absent field is not a zero.
+   */
+  rateLimit?: RateLimitInfo;
+}
+
+/**
+ * The rate-limit budget the server reports alongside a response.
+ *
+ * The middleware writes all four headers onto whatever response it is about
+ * to return, throttled or not, so a successful call carries them too — which
+ * is the point. `remaining` read off a healthy response is what lets a caller
+ * slow down *before* it is throttled; by the time a 429 arrives the only
+ * useful field left is `reset`.
+ *
+ * Two things to get right, both of which have bitten SDKs in this fleet:
+ *
+ * **`reset` is an absolute Unix timestamp, not a delay.** The server derives
+ * `Retry-After` from it by subtracting the current time, which is the proof.
+ * Sleeping for `reset` itself parks a caller for decades.
+ *
+ * **An absent field is not zero.** Every field is optional because the
+ * middleware writes nothing at all when no limiter is configured, skips
+ * `OPTIONS` preflight, and — installed with `route_layer` — never runs on an
+ * unmatched path. A client that reads a missing `remaining` as `0` throttles
+ * itself against a server that is not limiting it.
+ */
+export interface RateLimitInfo {
+  /** Requests allowed per window. */
+  limit?: number;
+  /** Requests left in the current window. `0` genuinely means none left. */
+  remaining?: number;
+  /** When the window refills, as **absolute** Unix seconds. */
+  reset?: number;
+  /** Window length in seconds. */
+  window?: number;
 }
 
 /**
@@ -179,6 +214,43 @@ export function extractResponseInfo(headers: Headers): ResponseInfo {
   if (edition !== null) info.tamgaEdition = edition;
   if (mode !== null) info.tamgaMode = mode;
   if (requestId !== null) info.requestId = requestId;
+  const rateLimit = extractRateLimitInfo(headers);
+  if (rateLimit !== undefined) info.rateLimit = rateLimit;
+  return info;
+}
+
+/**
+ * Reads the four `x-ratelimit-*` headers, or `undefined` when the server sent
+ * none of them.
+ *
+ * A header that is present but not a finite number is dropped rather than
+ * surfaced as `NaN`: every consumer of these values does arithmetic on them,
+ * and `NaN` propagates silently through a comparison instead of failing.
+ */
+function extractRateLimitInfo(headers: Headers): RateLimitInfo | undefined {
+  const read = (name: string): number | undefined => {
+    const raw = headers.get(name);
+    if (raw === null) return undefined;
+    const value = Number(raw.trim());
+    return Number.isFinite(value) ? value : undefined;
+  };
+  const limit = read("x-ratelimit-limit");
+  const remaining = read("x-ratelimit-remaining");
+  const reset = read("x-ratelimit-reset");
+  const window = read("x-ratelimit-window");
+  if (
+    limit === undefined &&
+    remaining === undefined &&
+    reset === undefined &&
+    window === undefined
+  ) {
+    return undefined;
+  }
+  const info: RateLimitInfo = {};
+  if (limit !== undefined) info.limit = limit;
+  if (remaining !== undefined) info.remaining = remaining;
+  if (reset !== undefined) info.reset = reset;
+  if (window !== undefined) info.window = window;
   return info;
 }
 
