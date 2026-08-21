@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { TamgaClient } from "../src/client.js";
-import { mockJsonApiResponse } from "./helpers/mockFetch.js";
+import { MACHINE_HEARTBEAT_INTERVAL_DIVISOR } from "../src/models/machine.js";
+import { jsonApi, mockJsonApiResponse, mockSequence } from "./helpers/mockFetch.js";
 
 /**
  * Serves one `machines` resource per call, walking `statuses` and repeating
@@ -123,6 +124,115 @@ describe("TamgaClient.startHeartbeat", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(1000);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    stop();
+  });
+});
+
+/**
+ * The interval guard.
+ *
+ * `setInterval` does not honour a degenerate delay, it shortens it: `0`, a
+ * negative number, `NaN`, `Infinity` and anything past the signed-32-bit
+ * ceiling all tick every 1 ms. Unguarded, that is not a crash — it is roughly
+ * a thousand `ping-heartbeat` requests a second, indefinitely, every one of
+ * them individually valid and correctly authenticated. Nothing about it looks
+ * like a failure from either end, which is what makes it worse than a crash.
+ *
+ * `startHeartbeatFromPolicy` already floored its own arithmetic. These pin the
+ * floor one level down, in the primitive, where it holds however a caller
+ * reaches the timer.
+ */
+describe("TamgaClient.startHeartbeat cannot be turned into a busy loop", () => {
+  const degenerate: ReadonlyArray<readonly [string, number]> = [
+    ["zero", 0],
+    ["a negative interval", -1],
+    ["NaN", Number.NaN],
+    ["Infinity", Number.POSITIVE_INFINITY],
+  ];
+
+  it.each(degenerate)("pings once a second when handed %s, not once a millisecond", async (
+    _label,
+    intervalMs,
+  ) => {
+    const fetchMock = mockJsonApiResponse({
+      id: "m-1",
+      type: "machines",
+      attributes: { heartbeat_status: "ALIVE" },
+    });
+
+    const stop = client().startHeartbeat("m-1", intervalMs);
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(fetchMock).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // The sharp form of the claim: five seconds is five pings, not five
+    // thousand.
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+
+    stop();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+  });
+
+  it("clamps past the 32-bit ceiling down to it, which is also a 1ms tick unguarded", async () => {
+    // The ceiling is the same defect as the floor: `setInterval` does not
+    // round an over-large delay down, it resets it to 1 ms (Node warns with
+    // `TimeoutOverflowWarning`; browsers wrap the 32-bit value).
+    const fetchMock = mockJsonApiResponse({ id: "m-1", type: "machines", attributes: {} });
+
+    const stop = client().startHeartbeat("m-1", 2_147_483_648);
+
+    await vi.advanceTimersByTimeAsync(2_147_483_646);
+    expect(fetchMock).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    stop();
+  });
+
+  it("leaves an interval that is already sane exactly as given", async () => {
+    const fetchMock = mockJsonApiResponse({ id: "m-1", type: "machines", attributes: {} });
+
+    const stop = client().startHeartbeat("m-1", 20_000);
+
+    await vi.advanceTimersByTimeAsync(19_999);
+    expect(fetchMock).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    stop();
+  });
+
+  it("survives the hand-rolled composition of the two public primitives", async () => {
+    // The reachable form of the defect: `heartbeat_duration` has no `CHECK`
+    // constraint, `effective_heartbeat_duration_secs` returns it verbatim, and
+    // `resolveHeartbeatWindowMs` deliberately reports it unchanged rather than
+    // hiding a misconfigured policy. Wiring the two public methods together by
+    // hand — a reasonable reading of methods that look designed to compose —
+    // therefore hands `startHeartbeat` a `0`.
+    const fetchMock = mockSequence(
+      jsonApi({ data: { id: "pol-1", type: "policies", attributes: { heartbeat_duration: 0 } } }),
+      jsonApi({ data: { id: "m-1", type: "machines", attributes: {} } }),
+      jsonApi({ data: { id: "m-1", type: "machines", attributes: {} } }),
+      jsonApi({ data: { id: "m-1", type: "machines", attributes: {} } }),
+    );
+
+    const c = client();
+    const windowMs = await c.resolveHeartbeatWindowMs("lic-1");
+    // Still verbatim — the accessor's contract is unchanged by this fix.
+    expect(windowMs).toBe(0);
+
+    const stop = c.startHeartbeat("m-1", windowMs / MACHINE_HEARTBEAT_INTERVAL_DIVISOR);
+    await vi.advanceTimersByTimeAsync(3000);
+
+    // One policy read plus three pings. `mockSequence` rejects a fourth ping,
+    // and the scheduler swallows the rejection, so a spin would show up here
+    // as a call count in the thousands rather than as an error.
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+
     stop();
   });
 });

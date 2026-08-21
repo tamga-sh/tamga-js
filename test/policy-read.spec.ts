@@ -218,6 +218,30 @@ describe("TamgaClient.startHeartbeatFromPolicy", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     stop();
   });
+
+  // `heartbeat_duration` is an unconstrained integer column — no `CHECK` — and
+  // `effective_heartbeat_duration_secs` returns whatever it holds; only `NULL`
+  // takes the 600s fallback. So `0` and a negative are values the server will
+  // really serve, and both divide down to something `setInterval` turns into a
+  // 1ms tick. The floor is what keeps them to one ping a second.
+  it.each([
+    ["a zero", 0],
+    ["a negative", -30],
+  ])("floors %s heartbeat_duration, which the column permits", async (_label, duration) => {
+    vi.useFakeTimers();
+    const fetchMock = mockSequence(
+      jsonApi({ data: policy({ heartbeat_duration: duration }) }),
+      jsonApi({ data: { id: "m-1", type: "machines", attributes: {} } }),
+      jsonApi({ data: { id: "m-1", type: "machines", attributes: {} } }),
+    );
+    const stop = await client().startHeartbeatFromPolicy("m-1", "lic-1");
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1001);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    stop();
+  });
 });
 
 describe("MAX_PAGE_SIZE is shared by both pagination styles", () => {
