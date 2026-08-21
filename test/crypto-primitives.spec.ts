@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { ed25519 } from "@noble/curves/ed25519";
 import { p256 } from "@noble/curves/nist";
+import { sha256 } from "@noble/hashes/sha2";
 import { verifyEd25519 } from "../src/crypto/ed25519.js";
 import { verifyEcdsaP256 } from "../src/crypto/ecdsa.js";
-import { verifyRsaPkcs1, verifyRsaPss } from "../src/crypto/rsa.js";
+import { toRsaSpki, verifyRsaPkcs1, verifyRsaPss } from "../src/crypto/rsa.js";
 import { getWebCrypto } from "../src/internal/webcrypto.js";
 
 const enc = new TextEncoder();
@@ -43,20 +44,43 @@ function uncompressedPublicKey(secretKey: Uint8Array): Uint8Array {
   return p256.getPublicKey(secretKey, false);
 }
 
+/**
+ * Signs the way the server does: `@noble/curves` takes a message DIGEST, so the
+ * SHA-256 has to be applied here, exactly as `ECDSA_P256_SHA256_ASN1` does
+ * server-side. Signing the raw message instead round-trips against a verifier
+ * that also skips the hash and matches nothing the server emits — the mistake
+ * this suite used to make on both sides at once.
+ */
+function signEcdsaLikeTheServer(message: Uint8Array, secretKey: Uint8Array): Uint8Array {
+  return p256.sign(sha256(message), secretKey).toBytes("der");
+}
+
 describe("verifyEcdsaP256", () => {
-  it("accepts a valid DER signature", () => {
+  it("accepts a valid DER signature over the SHA-256 digest", () => {
     const { secretKey } = p256.keygen();
     const publicKey = uncompressedPublicKey(secretKey);
     const message = enc.encode("data");
-    const signature = p256.sign(message, secretKey).toBytes("der");
-    expect(verifyEcdsaP256(message, signature, publicKey)).toBe(true);
+    expect(verifyEcdsaP256(message, signEcdsaLikeTheServer(message, secretKey), publicKey)).toBe(
+      true,
+    );
+  });
+
+  it("rejects a signature taken over the unhashed message", () => {
+    // Regression guard for the defect this module shipped with: noble's
+    // `verify` accepts any byte string as a "digest" and silently truncates it,
+    // so an unhashed signature verified fine against an unhashed verifier.
+    const { secretKey } = p256.keygen();
+    const publicKey = uncompressedPublicKey(secretKey);
+    const message = enc.encode("data");
+    const unhashed = p256.sign(message, secretKey).toBytes("der");
+    expect(verifyEcdsaP256(message, unhashed, publicKey)).toBe(false);
   });
 
   it("rejects a tampered signature", () => {
     const { secretKey } = p256.keygen();
     const publicKey = uncompressedPublicKey(secretKey);
     const message = enc.encode("data");
-    const signature = p256.sign(message, secretKey).toBytes("der");
+    const signature = signEcdsaLikeTheServer(message, secretKey);
     const lastIndex = signature.length - 1;
     signature[lastIndex] = (signature[lastIndex] ?? 0) ^ 0xff;
     expect(verifyEcdsaP256(message, signature, publicKey)).toBe(false);
@@ -67,8 +91,9 @@ describe("verifyEcdsaP256", () => {
     const b = p256.keygen();
     const publicKeyA = uncompressedPublicKey(a.secretKey);
     const message = enc.encode("data");
-    const signature = p256.sign(message, b.secretKey).toBytes("der");
-    expect(verifyEcdsaP256(message, signature, publicKeyA)).toBe(false);
+    expect(verifyEcdsaP256(message, signEcdsaLikeTheServer(message, b.secretKey), publicKeyA)).toBe(
+      false,
+    );
   });
 });
 
@@ -137,5 +162,63 @@ describe("verifyRsaPss", () => {
       await webcrypto.subtle.sign("RSASSA-PKCS1-v1_5", keyPair.privateKey, message),
     );
     await expect(verifyRsaPss(message, signature, spki)).resolves.toBe(false);
+  });
+});
+
+describe("toRsaSpki — the API publishes PKCS#1, WebCrypto imports SPKI", () => {
+  /**
+   * Strips an SPKI down to the PKCS#1 `RSAPublicKey` it wraps — the encoding
+   * the Tamga API publishes.
+   *
+   * RSA-2048 SPKI has fixed offsets: `30 82 xx xx` outer header (4), the
+   * 15-byte rsaEncryption `AlgorithmIdentifier`, `03 82 xx xx` BIT STRING
+   * header (4), then one "unused bits" byte, then the RSAPublicKey.
+   */
+  function spkiToPkcs1(spki: Uint8Array): Uint8Array {
+    const OUTER_HEADER = 4;
+    const ALGORITHM_IDENTIFIER = 15;
+    const BIT_STRING_HEADER = 4;
+    const UNUSED_BITS_BYTE = 1;
+    return spki.subarray(
+      OUTER_HEADER + ALGORITHM_IDENTIFIER + BIT_STRING_HEADER + UNUSED_BITS_BYTE,
+    );
+  }
+
+  it("verifies a signature against the PKCS#1 form of the same key", async () => {
+    const { spki, keyPair } = await generateRsaKeyPair("RSASSA-PKCS1-v1_5");
+    const message = enc.encode("data");
+    const webcrypto = await getWebCrypto();
+    const signature = new Uint8Array(
+      await webcrypto.subtle.sign("RSASSA-PKCS1-v1_5", keyPair.privateKey, message),
+    );
+
+    const pkcs1 = spkiToPkcs1(spki);
+    expect(pkcs1[0]).toBe(0x30);
+    expect(pkcs1.length).toBeLessThan(spki.length);
+
+    // Both encodings of one key must reach the same verdict.
+    expect(await verifyRsaPkcs1(message, signature, spki)).toBe(true);
+    expect(await verifyRsaPkcs1(message, signature, pkcs1)).toBe(true);
+  });
+
+  it("re-encodes a PKCS#1 key and leaves an SPKI alone", async () => {
+    const { spki } = await generateRsaKeyPair("RSASSA-PKCS1-v1_5");
+    const pkcs1 = spkiToPkcs1(spki);
+    expect(Array.from(toRsaSpki(pkcs1))).toEqual(Array.from(spki));
+    expect(Array.from(toRsaSpki(spki))).toEqual(Array.from(spki));
+  });
+
+  it("passes malformed input through untouched, for importKey to reject", () => {
+    // No DER parsing beyond one tag byte, and every read is bounds-checked, so
+    // a short or nonsense blob must not throw here.
+    for (const junk of [
+      new Uint8Array(),
+      Uint8Array.from([0x30]),
+      Uint8Array.from([0x30, 0x82]),
+      Uint8Array.from([0x30, 0x03, 0x05, 0x00, 0x00]),
+      Uint8Array.from([0x02, 0x01, 0x00]),
+    ]) {
+      expect(Array.from(toRsaSpki(junk))).toEqual(Array.from(junk));
+    }
   });
 });

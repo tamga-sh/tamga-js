@@ -32,10 +32,16 @@ const scheme: LicenseScheme =
   (process.env.TAMGA_LICENSE_SCHEME as LicenseScheme | undefined) ?? "ED25519_SIGN";
 
 // The public key format depends on the scheme: 32 raw bytes for Ed25519,
-// a SubjectPublicKeyInfo (SPKI) DER blob for either RSA variant, or a
-// 65-byte uncompressed P-256 point for ECDSA.
+// a 65-byte uncompressed P-256 point for ECDSA, or — for either RSA
+// variant — the RSA public key in DER. Both DER encodings are accepted:
+// the PKCS#1 `RSAPublicKey` blob the API publishes, and SPKI.
 const publicKey = new Uint8Array(Buffer.from(process.env.TAMGA_SCHEME_PUBLIC_KEY_BASE64 ?? "", "base64"));
 
+// A machine file's expiry lives inside the signature (`meta.exp`) and is
+// enforced here, so an expired-but-authentic file throws a CheckoutError
+// of kind "expired" — distinct from a forgery, which is kind "crypto".
+// Pass a trusted timestamp as the fifth argument when the local clock
+// cannot be trusted; it belongs to whoever holds the file.
 const machine = await verifyAndDecryptMachineFile(pem, scheme, publicKey, {
   // Both are required for the encrypted variant — decrypting a machine
   // file needs the license key AND the target machine's fingerprint

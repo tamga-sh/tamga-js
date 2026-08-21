@@ -10,6 +10,8 @@
  * serializer, not the summary, is the authority here.
  */
 
+import { MACHINE_HEARTBEAT_WINDOW_MS } from "./machine.js";
+
 /**
  * Signing scheme used for license/machine checkout files (and, always,
  * regardless of this value, machine offline proofs — see `src/proof.ts`).
@@ -336,4 +338,33 @@ export interface PolicyAttributes {
   created: string;
   /** Last-updated timestamp. */
   updated: string;
+}
+
+/**
+ * The machine heartbeat window this policy actually imposes, in milliseconds.
+ *
+ * Mirrors the server's `Policy::effective_heartbeat_duration_secs`
+ * (`tamga-api/src/features/policies/model.rs`) exactly: the policy's
+ * `heartbeat_duration` seconds when the column is set, and the
+ * {@link import("./machine.js").MACHINE_HEARTBEAT_WINDOW_MS} fallback (600 s)
+ * only when it is `null`. The cull job's claim query uses the same
+ * `COALESCE(p.heartbeat_duration, 600)`, so this is the number a machine is
+ * really judged against.
+ *
+ * ⚠️ This is the **window**, not a ping interval. Divide it — by
+ * {@link import("./machine.js").MACHINE_HEARTBEAT_INTERVAL_DIVISOR}, say — before
+ * handing it to a scheduler; pinging exactly on the window boundary loses the
+ * race every time the network is slow.
+ *
+ * The value is returned as the server reports it, including a non-positive
+ * `heartbeat_duration` if a policy somehow carries one. That is deliberate:
+ * this function's job is to say what the server will judge the machine on, and
+ * silently substituting a friendlier number here would hide a misconfigured
+ * policy rather than surface it.
+ */
+export function effectiveHeartbeatWindowMs(policy: Policy): number {
+  const seconds = policy.attributes.heartbeat_duration;
+  return typeof seconds === "number" && Number.isFinite(seconds)
+    ? seconds * 1000
+    : MACHINE_HEARTBEAT_WINDOW_MS;
 }

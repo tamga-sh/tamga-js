@@ -69,8 +69,10 @@ export function parseProofToken(proof: string): { version: string; signature: Ui
  * been generated for. Always RSA-2048 PKCS#1 v1.5 / SHA-256, regardless of
  * the license's own `scheme`.
  *
- * Works fully offline once `rsaPublicKey` (SubjectPublicKeyInfo DER) is
- * embedded in the calling application. Returns `true`/`false` rather than
+ * Works fully offline once `rsaPublicKey` is embedded in the calling
+ * application. That is the account's RSA public key in DER, in either
+ * encoding `src/crypto/rsa.ts` accepts: the PKCS#1 `RSAPublicKey` blob the
+ * API actually publishes, or SubjectPublicKeyInfo. Returns `true`/`false` rather than
  * throwing on a verification failure — a malformed proof string (bad
  * prefix/base64) still throws {@link ProofError}, since that's a caller
  * usage error distinct from "the signature didn't verify."

@@ -32,7 +32,8 @@ const { machine, proof } = await client.generateOfflineProof(machineId, dataset)
 console.log(`Got proof token for machine ${machine.id}: ${proof}`);
 
 // Verification is fully offline — embed your account's RSA public key
-// (SubjectPublicKeyInfo DER) in the shipped application.
+// (PKCS#1 `RSAPublicKey` DER as the API publishes it, or SPKI — both are
+// accepted) in the shipped application.
 const rsaPublicKey = new Uint8Array(
   Buffer.from(process.env.TAMGA_RSA_PUBLIC_KEY_BASE64 ?? "", "base64"),
 );

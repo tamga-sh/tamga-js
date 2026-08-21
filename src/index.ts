@@ -22,7 +22,16 @@
  */
 
 export { TamgaClient, MAX_PAGE_SIZE } from "./client.js";
-export type { TamgaClientConfig, CreateMachineOptions, ListOptions } from "./client.js";
+export type {
+  TamgaClientConfig,
+  CreateMachineOptions,
+  ListOptions,
+  ListMachinesOptions,
+  MachineSortField,
+  SortOrder,
+  UpdateMachineOptions,
+  UpgradeCheckOptions,
+} from "./client.js";
 
 export type { AuthCredentials, BasicAuthForm, TransportConfig, ResponseInfo } from "./transport.js";
 export { sanitizeVersion, DEFAULT_API_VERSION, DEFAULT_TIMEOUT_MS } from "./transport.js";
@@ -42,7 +51,16 @@ export type {
   ProcessAttributes,
   HeartbeatStatus,
 } from "./models/machine.js";
-export { toPidString, MACHINE_HEARTBEAT_WINDOW_MS, PROCESS_HEARTBEAT_WINDOW_MS } from "./models/machine.js";
+export {
+  toPidString,
+  heartbeatWindowMsFromMachine,
+  MACHINE_HEARTBEAT_WINDOW_MS,
+  MACHINE_HEARTBEAT_INTERVAL_DIVISOR,
+  PROCESS_HEARTBEAT_WINDOW_MS,
+} from "./models/machine.js";
+export type { OffsetPage, OffsetPageMeta } from "./models/page.js";
+export type { Release, ReleaseAttributes } from "./models/release.js";
+export type { HealthStatus } from "./models/health.js";
 export type {
   Policy,
   PolicyAttributes,
@@ -56,6 +74,7 @@ export {
   overageStrategyAllows,
   resolveOverageStrategy,
   resolveHeartbeatResurrectionStrategy,
+  effectiveHeartbeatWindowMs,
   ExpirationStrategy,
   RenewalBasis,
   AuthenticationStrategy,
@@ -99,21 +118,31 @@ export type { TamgaApiError, JsonApiErrorObject, JsonApiErrorSource } from "./er
 export {
   parseLicenseFile,
   verifyAndDecryptLicenseFile,
+  verifyLicenseFileWithClaims,
 } from "./checkout/licenseFile.js";
 export type {
   LicenseFileAlgorithm,
   ParsedLicenseFile,
   LicenseFile,
   LicenseFileResource,
+  LicenseFileClaims,
+  VerifiedLicenseFile,
 } from "./checkout/licenseFile.js";
 
 export {
   parseMachineFile,
   verifyAndDecryptMachineFile,
+  verifyMachineFileWithClaims,
   checkTtl,
   MAX_TTL_SECS,
 } from "./checkout/machineFile.js";
-export type { ParsedMachineFile, MachineFile, MachineFileResource } from "./checkout/machineFile.js";
+export type {
+  ParsedMachineFile,
+  MachineFile,
+  MachineFileResource,
+  MachineFileClaims,
+  VerifiedMachineFile,
+} from "./checkout/machineFile.js";
 
 export { parseProofToken, verifyOfflineProof } from "./proof.js";
 
