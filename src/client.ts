@@ -577,10 +577,12 @@ export class TamgaClient {
    * independent reasons that is the right design. First, a ping cannot even
    * report `"DEAD"`: it writes `last_heartbeat_at = NOW()` and then derives
    * the status from that same timestamp, so it answers `ALIVE` or
-   * `RESURRECTED`; `DEAD` is visible only from a machine read this SDK does
-   * not expose. Second, `DEAD` would not be a stop condition anyway — it
-   * does not mean the row was culled, and the ping revives the machine
-   * regardless. See {@link import("./models/machine.js").HeartbeatStatus}.
+   * `RESURRECTED`. (`DEAD` is real and does reach this SDK — but through a
+   * read-backed response, i.e. a checked-out machine file or the `machine`
+   * half of {@link generateOfflineProof} — never through this route.)
+   * Second, `DEAD` would not be a stop condition anyway: it does not mean
+   * the row was culled, and the ping revives the machine regardless. See
+   * {@link import("./models/machine.js").HeartbeatStatus}.
    *
    * Ping failures are swallowed (the timer keeps running) so a single
    * transient network blip doesn't kill the scheduler. That includes the

@@ -10,16 +10,18 @@
  * jitter) is therefore correct only while `heartbeat_duration` is unset: if
  * your policy sets it, find that value out of band and divide it instead.
  *
- * ⚠️ There is deliberately no `case "DEAD"` below. A ping cannot return
- * that status: it writes `last_heartbeat_at = NOW()` and then derives the
- * status from that same timestamp, so it answers ALIVE or RESURRECTED.
- * `DEAD` is a real server state, but it is visible only from a machine read
- * (`GET /machines/{id}`) that this SDK does not expose — a branch on it here
- * would be dead code. Nor would it be a stop condition if it were reachable:
- * it does not mean the machine was culled (culling runs only under
- * `require_heartbeat = true`, which is not the default) and the ping revives
- * the machine anyway. The one terminal signal is a 404 from the ping,
- * meaning the row is gone, which is what this example re-activates on.
+ * ⚠️ There is deliberately no `case "DEAD"` below, because a *ping* cannot
+ * return that status: it writes `last_heartbeat_at = NOW()` and then derives
+ * the status from that same timestamp, so it answers ALIVE or RESURRECTED.
+ * A branch on DEAD *here* would be dead code. DEAD is reachable elsewhere in
+ * this SDK — a checked-out machine file (see
+ * `docs/examples/offline-machine-file.ts`) is resolved through a read that
+ * joins the policy, so the Machine it yields carries a real staleness
+ * verdict — it just never arrives on this route. And even there it would not
+ * be a stop condition: it does not mean the machine was culled (culling runs
+ * only under `require_heartbeat = true`, which is not the default) and the
+ * ping revives the machine anyway. The one terminal signal is a 404 from the
+ * ping, meaning the row is gone, which is what this example re-activates on.
  */
 import { TamgaClient, NotFoundError, MACHINE_HEARTBEAT_WINDOW_MS } from "@tamga/sdk";
 
@@ -77,8 +79,8 @@ const statusCheck = setInterval(async () => {
 
   // RESURRECTED is the only interesting status a ping can hand back: the
   // machine had fallen outside its window and this ping revived it. Whatever
-  // comes back, neither timer stops — see this file's header for why there is
-  // no DEAD branch.
+  // comes back, neither timer stops — see this file's header for why a DEAD
+  // branch would be dead code on this route specifically.
   if (current.attributes.heartbeat_status === "RESURRECTED") {
     console.log("Machine had lapsed and this ping revived it; heartbeat continues.");
   }

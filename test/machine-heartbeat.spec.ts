@@ -36,8 +36,8 @@ describe("pingHeartbeat on a machine that has lapsed", () => {
     // resurrection check, and it derives the returned status from the
     // timestamp it just wrote — so a lapsed machine answers normally and
     // comes back RESURRECTED. `DEAD` is not among the statuses this route
-    // can produce; it is visible only from a machine read this SDK does not
-    // expose.
+    // can produce; it arrives only on read-backed responses, such as the
+    // machine inside a checked-out `.mach` file.
     const fetchMock = mockJsonApiResponse({
       ...machineFixture,
       attributes: { ...machineFixture.attributes, heartbeat_status: "RESURRECTED" },

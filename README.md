@@ -93,7 +93,8 @@ Five of these need a caveat before you wire them in:
 - `listEntitlements` ignores `after`: that route is not paginable server-side.
 - `createMachine`'s `memory` / `disk` are **megabytes**.
 - `startHeartbeat` never stops on a `heartbeat_status` value — and a ping
-  cannot report `"DEAD"` in the first place. See **Known gaps**.
+  cannot report `"DEAD"` in the first place (a checked-out machine file can).
+  See **Known gaps**.
 
 Errors are typed subclasses of `TamgaError` (`NotFoundError`,
 `FingerprintTakenError`, `MachineLimitExceededError`,
@@ -337,17 +338,21 @@ Things this SDK deliberately does not do, or cannot do yet.
   16 GB as `17179869184` instead of `16384` inflates the account tally by
   roughly a million and gets the next activation on that license refused with
   `MEMORY_LIMIT_EXCEEDED`.
-- **`heartbeat_status: "DEAD"` is not observable from this SDK, and would
-  not mean the machine was culled if it were.** No route here can return it:
-  `pingHeartbeat` writes `last_heartbeat_at = NOW()` and then derives the
-  status from that same timestamp, so it answers `ALIVE` or `RESURRECTED`;
-  `resetHeartbeat` nulls the column (`NOT_STARTED`); `createMachine` never
-  sets it (`NOT_STARTED`); and validate never emits `HEARTBEAT_DEAD`. `DEAD`
-  is a real server state, reachable only from a machine read
-  (`GET /machines/{id}`) that this SDK does not expose — so a `case "DEAD"`
-  in your code today is dead code, and the literal stays in `HeartbeatStatus`
-  only because it goes live the day a machine-read method lands. Even then it
-  would not mean the row was culled: the cull job runs exclusively for
+- **`heartbeat_status: "DEAD"` never comes back from a ping, and does not
+  mean the machine was culled where it does.** Nothing built off a row the
+  request just wrote can report it: `pingHeartbeat` writes
+  `last_heartbeat_at = NOW()` and then derives the status from that same
+  timestamp, so it answers `ALIVE` or `RESURRECTED`; `resetHeartbeat` nulls
+  the column (`NOT_STARTED`); `createMachine` never sets it (`NOT_STARTED`);
+  and validate never emits `HEARTBEAT_DEAD`. Read-backed responses can, and
+  this SDK has two: machine **checkout** resolves the machine through a
+  lookup that joins the policy, so the `Machine` returned by
+  `verifyAndDecryptMachineFile` carries a genuine staleness verdict that may
+  be `DEAD`, and `generateOfflineProof`'s `machine` half is built the same
+  way. (`GET /machines/{id}` would too; this SDK exposes no machine read.) So
+  branch on `DEAD` from a machine file if it is useful — just never from a
+  ping, where it cannot appear. Even from a file it does not mean the row
+  was culled: the cull job runs exclusively for
   policies with `require_heartbeat = true`, which **defaults to `false`**, so
   under a default policy no row is ever culled and a machine stays `DEAD`
   indefinitely with its row and its seat intact — and a ping revives it

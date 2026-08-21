@@ -36,15 +36,18 @@ wrong.
 
 Also corrected: a machine's `heartbeat_status` of `"DEAD"` was documented
 throughout as "the row was culled — re-activate instead of pinging". Both
-halves of that are wrong. `DEAD` is not observable from any route this SDK
-calls — `pingHeartbeat` writes `last_heartbeat_at = NOW()` and then derives the
-status from that same timestamp, so it answers `ALIVE` or `RESURRECTED`;
-`resetHeartbeat` nulls the column (`NOT_STARTED`); `createMachine` never sets it
-(`NOT_STARTED`); and validate never emits `HEARTBEAT_DEAD`. It is a real server
-state, but only a machine read (`GET /machines/{id}`) surfaces it and this SDK
-exposes none, so the literal stays in `HeartbeatStatus` as forward-compat and a
-`case "DEAD"` in your code is dead code today. Nor would `DEAD` mean the row was
-culled: the cull job runs exclusively for policies with
+halves of that are wrong. No response built off a row the request just wrote can
+report `DEAD` — `pingHeartbeat` writes `last_heartbeat_at = NOW()` and then
+derives the status from that same timestamp, so it answers `ALIVE` or
+`RESURRECTED`; `resetHeartbeat` nulls the column (`NOT_STARTED`);
+`createMachine` never sets it (`NOT_STARTED`); and validate never emits
+`HEARTBEAT_DEAD`. Read-backed responses do carry it: machine checkout and
+offline-proof both resolve the machine through a lookup that joins the policy,
+so the `Machine` returned by `verifyAndDecryptMachineFile`, and the `machine`
+half of `generateOfflineProof`, carry a genuine staleness verdict that may be
+`DEAD`. Branch on it there if useful; never on a ping response, where it cannot
+appear. And `DEAD` does not mean the row was culled: the cull job runs
+exclusively for policies with
 `require_heartbeat = true`, which defaults to `false`, so under a default policy
 no row is ever culled and a machine stays `DEAD` indefinitely with its row and
 its seat intact — and a ping revives it regardless (bare

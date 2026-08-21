@@ -163,6 +163,14 @@ export function parseMachineFile(pem: string): ParsedMachineFile {
  * {@link Machine} once the signature (and decryption, if encrypted) has
  * checked out.
  *
+ * The returned machine's `heartbeat_status` is a **real staleness verdict**,
+ * unlike the one a ping hands back: the server resolves the machine for
+ * checkout through a lookup that joins the policy and reads a row nobody
+ * just wrote, so this is the one place in this SDK where
+ * {@link import("../models/machine.js").HeartbeatStatus} can legitimately be
+ * `"DEAD"`. It is a snapshot from issue time, not a live reading, and
+ * `DEAD` still does not mean the row was culled — see that type's doc.
+ *
  * `scheme` **must** come from the license's own `scheme` field (via
  * whatever license resource governs this machine) — never from parsing the
  * file's `alg` string, which cannot safely disambiguate `RSA_2048_PKCS1_SIGN`

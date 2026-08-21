@@ -68,19 +68,26 @@ export interface MachineAttributes {
  * your policy. On a policy with a shorter `heartbeat_duration` you must learn
  * the real window out of band and size your own ping interval against it.
  *
- * ⚠️ **`DEAD` is not observable through any route this SDK calls today.**
- * Every method here comes back with something else: `pingHeartbeat` writes
- * `last_heartbeat_at = NOW()` and then derives the status from that same
- * timestamp, so it answers `ALIVE` or `RESURRECTED` and never `DEAD`;
- * `resetHeartbeat` nulls the column (`NOT_STARTED`); `createMachine` never
- * sets it (`NOT_STARTED`); and license validate never emits
- * `HEARTBEAT_DEAD`. `DEAD` is a real server state — it is simply reachable
- * only from a machine **read** (`GET /machines/{id}`, which joins the
- * policy), and this SDK exposes none. The literal stays in this union
- * because it is part of the wire model and goes live the day a machine-read
- * method lands; until then, do not branch on it.
+ * ⚠️ **Which responses can carry `DEAD` depends on how the row was
+ * produced.** A response built off a row the request just wrote never can:
+ * `pingHeartbeat` writes `last_heartbeat_at = NOW()` and then derives the
+ * status from that same timestamp, so it answers `ALIVE` or `RESURRECTED`
+ * and never `DEAD`; `resetHeartbeat` nulls the column (`NOT_STARTED`);
+ * `createMachine` never sets it (`NOT_STARTED`); and license validate never
+ * emits `HEARTBEAT_DEAD`.
  *
- * ⚠️ **And `DEAD` would not mean the machine was culled.** It means one
+ * A response built off a **read** can, and this SDK has two: machine
+ * checkout resolves the machine through a lookup that joins the policy, so
+ * the {@link Machine} that
+ * {@link import("../checkout/machineFile.js").verifyAndDecryptMachineFile}
+ * returns carries a genuine staleness verdict and its `heartbeat_status` may
+ * be `DEAD`; the `machine` half of
+ * {@link import("../client.js").TamgaClient.generateOfflineProof} is built
+ * the same way. (`GET /machines/{id}` would too — this SDK exposes no
+ * machine read.) So branch on `DEAD` **there** if you have a use for it;
+ * just never on a ping response, where it cannot appear.
+ *
+ * ⚠️ **And `DEAD` does not mean the machine was culled.** It means one
  * thing only: the last ping is older than the window. The row is still
  * there, the seat is still taken, and nothing has been deleted or
  * deactivated. The cull job that would remove it runs only for policies with
