@@ -552,14 +552,15 @@ export class CheckoutError extends TamgaError {
 
   /**
    * The file's signature verified, but its signed `exp` claim is in the past —
-   * an authentic license file that has simply run out.
+   * an authentic `.lic`/`.mach` file that has simply run out. Both formats
+   * carry the same signed `meta.exp` and both raise this.
    *
    * Its own kind on purpose: a caller that cannot tell "expired" from "forged"
    * either warns the user about tampering when their trial merely ended, or
    * treats a forgery as a renewal prompt.
    */
   static expired(exp: number): CheckoutError {
-    return new CheckoutError(`license file expired at unix timestamp ${exp}`, "expired");
+    return new CheckoutError(`checkout file expired at unix timestamp ${exp}`, "expired");
   }
 
   static licenseKeyMissing(): CheckoutError {

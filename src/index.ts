@@ -99,21 +99,31 @@ export type { TamgaApiError, JsonApiErrorObject, JsonApiErrorSource } from "./er
 export {
   parseLicenseFile,
   verifyAndDecryptLicenseFile,
+  verifyLicenseFileWithClaims,
 } from "./checkout/licenseFile.js";
 export type {
   LicenseFileAlgorithm,
   ParsedLicenseFile,
   LicenseFile,
   LicenseFileResource,
+  LicenseFileClaims,
+  VerifiedLicenseFile,
 } from "./checkout/licenseFile.js";
 
 export {
   parseMachineFile,
   verifyAndDecryptMachineFile,
+  verifyMachineFileWithClaims,
   checkTtl,
   MAX_TTL_SECS,
 } from "./checkout/machineFile.js";
-export type { ParsedMachineFile, MachineFile, MachineFileResource } from "./checkout/machineFile.js";
+export type {
+  ParsedMachineFile,
+  MachineFile,
+  MachineFileResource,
+  MachineFileClaims,
+  VerifiedMachineFile,
+} from "./checkout/machineFile.js";
 
 export { parseProofToken, verifyOfflineProof } from "./proof.js";
 

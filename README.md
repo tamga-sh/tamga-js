@@ -166,7 +166,9 @@ in your application, so they work in air-gapped environments.
 | Function | Purpose |
 |---|---|
 | `verifyAndDecryptLicenseFile(pem, ed25519PublicKey, licenseKey?, now?)` | Verify, decrypt and expiry-check a `.lic` file |
-| `verifyAndDecryptMachineFile(pem, scheme, publicKey, keyMaterial?)` | Verify and decrypt a `.mach` file (multi-scheme) |
+| `verifyLicenseFileWithClaims(pem, ed25519PublicKey, licenseKey?, now?)` | The same, also returning the signed `iat`/`exp`/`jti`/`kid` |
+| `verifyAndDecryptMachineFile(pem, scheme, publicKey, keyMaterial?, now?)` | Verify, decrypt and expiry-check a `.mach` file (multi-scheme) |
+| `verifyMachineFileWithClaims(pem, scheme, publicKey, keyMaterial?, now?)` | The same, also returning the signed `iat`/`exp`/`jti`/`kid` |
 | `verifyOfflineProof(proof, accountId, machineId, fingerprint, dataset, rsaPublicKey)` | Verify a `"v1x0."` offline proof token |
 
 ```ts
@@ -214,13 +216,22 @@ const machine = await verifyAndDecryptMachineFile(machPem, scheme, publicKey, {
 });
 ```
 
-> **Compatibility warning — offline license files must be format v2.**
-> `alg` must end in `+v2` and the signed payload must carry its `meta` claims.
-> A `.lic` file issued under v1 is **rejected outright, with no fallback path**
-> (`src/checkout/licenseFile.ts::verifyLicenseFileWithClaims`). This is a real
+`publicKey` is your account's public key for `scheme`: 32 raw bytes for Ed25519,
+a 65-byte uncompressed P-256 point for ECDSA, or — for either RSA variant — the
+RSA public key in DER. Both DER encodings are accepted: the PKCS#1
+`RSAPublicKey` blob the API publishes, and SubjectPublicKeyInfo.
+
+A machine file carries the same signed `meta.exp` a license file does, and it is
+enforced here too, so pass a trusted timestamp as the fifth argument (`now`)
+when the local clock cannot be trusted.
+
+> **Compatibility warning — offline license *and machine* files must be format
+> v2.** `alg` must end in `+v2` and the signed payload must carry its `meta`
+> claims; a file issued under v1 is **rejected outright, with no fallback path**
+> (`src/checkout/licenseFile.ts::verifyLicenseFileWithClaims`,
+> `src/checkout/machineFile.ts::verifyMachineFileWithClaims`). This is a real
 > behavioural break for any caller still holding a v1-issued file: re-run
-> checkout to obtain a v2 file. Machine files are unaffected — they have no v2
-> format.
+> checkout to obtain a v2 file.
 
 ## Security notes
 
@@ -237,10 +248,14 @@ claim below names the code that implements it.
   anywhere but on the machine it was issued for. The pre-v2 transform that
   zero-padded the raw license key to 32 bytes was **deleted, not deprecated** —
   no code path can produce that key any more.
-- **A license file's expiry is inside the signature and is enforced for you.**
+- **Both formats' expiry is inside the signature and is enforced for you.**
   `meta.exp` is checked with a 60-second clock-skew tolerance and an expired file
   throws `CheckoutError` of kind `"expired"`
-  (`src/checkout/licenseFile.ts::verifyLicenseFileWithClaims`). The tolerance is
+  (`src/checkout/licenseFile.ts::verifyLicenseFileWithClaims`,
+  `src/checkout/machineFile.ts::verifyMachineFileWithClaims` — one shared
+  `CLOCK_SKEW_TOLERANCE_SECONDS`, so the two cannot drift apart). `exp` is
+  absent when checkout was made without a `ttl`, which is a file that genuinely
+  never expires, not an error. The tolerance is
   deliberately small: the client's clock belongs to the attacker, so a generous
   allowance would be a free extension on every expired file. The `ttl` / `expiry`
   fields on the checkout *envelope* remain unsigned metadata and must not be
@@ -254,10 +269,19 @@ claim below names the code that implements it.
 - **Ed25519 verification is strict.** `zip215: false`, i.e. RFC 8032 / FIPS 186-5
   semantics, rejecting malleable signatures and non-canonical `S`
   (`src/crypto/ed25519.ts::verifyEd25519`).
-- **Algorithm confusion is guarded twice.** The scheme is chosen by the caller,
-  never parsed from the file, and the file's declared `alg` suffix must match
-  what that scheme implies; `RSA_2048_JWT_RS256` is rejected up front, before any
-  parsing (`src/checkout/machineFile.ts::verifyAndDecryptMachineFile`).
+- **Algorithm confusion is guarded three ways.** The scheme is chosen by the
+  caller, never parsed from the file; the file's declared `alg` suffix must
+  match what that scheme implies; and `RSA_2048_JWT_RS256` is rejected up front,
+  before any parsing (`src/checkout/machineFile.ts::verifyMachineFileWithClaims`).
+  The suffix cannot stand in for the scheme even in principle — the server emits
+  the same `rsa-sha256` for `RSA_2048_PKCS1_SIGN` and `RSA_2048_JWT_RS256`.
+- **Machine-file verification is tested against certificates the server
+  produced**, not ones this SDK built: 12 fixtures in
+  `test/fixtures/machine-file-v2/`, four signing schemes by three variants,
+  driven off their manifest by `test/machine-file-server-fixtures.spec.ts` and
+  re-run against the built output on Node, Deno and Bun by `scripts/smoke.mjs`.
+  A self-generated fixture can only ever encode this SDK's belief about the wire
+  format, and when that belief was wrong it hid the defects for two years.
 - **Offline-proof payloads are canonicalised before verification**, sorted by
   UTF-8 byte order and rebuilt on a null-prototype accumulator so a
   `"__proto__"`-keyed dataset cannot silently drop a field from the signed bytes
@@ -290,15 +314,11 @@ Reporting a vulnerability: see [`SECURITY.md`](./SECURITY.md).
 
 Things this SDK deliberately does not do, or cannot do yet.
 
-- **Signed license-file claims are not reachable from the published package.**
-  `verifyLicenseFileWithClaims` returns `jti` (replay detection) and `kid` (key
-  rotation) alongside the license, and accepts an injectable clock, but it is
-  not re-exported from the package entrypoint and the `exports` map has no deep
-  import path. `verifyAndDecryptLicenseFile` still enforces `exp`; only the
-  claim values are unavailable.
-- **Machine files have no signed expiry.** Format v2 covers `.lic` only. A
-  `.mach` file's `ttl` / `expiry` are unsigned envelope metadata, so nothing here
-  can enforce a machine file's lifetime — treat it as perpetual once issued.
+- **Key rotation is not handled.** Both formats' `meta.kid` identifies the
+  signing key and is returned by `verifyLicenseFileWithClaims` /
+  `verifyMachineFileWithClaims`, but nothing here selects a key by it — you
+  still embed exactly one public key per scheme and a rotation invalidates
+  files issued under the previous one.
 - **The 429 retry budget is not configurable.** It is fixed at three attempts and
   is not plumbed through `TamgaClientConfig`.
 - **`X-RateLimit-*` response headers are unavailable** — no server handler sets
