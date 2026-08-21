@@ -537,6 +537,57 @@ export async function sendJsonApiWithMeta<T, M>(
 }
 
 /**
+ * Like {@link sendJsonApi}, but tolerates a `204 No Content` answer and
+ * reports it as `undefined` rather than crashing on a missing envelope.
+ *
+ * Only one route this SDK calls behaves this way: `GET
+ * /releases/actions/upgrade`, which returns `204` both when the caller is
+ * already current and when a newer release exists that this license may not
+ * have. {@link sendJsonApi} would read `.data` off an `undefined` body and
+ * throw a `TypeError` from inside the transport, which is not a failure mode
+ * any caller can act on.
+ *
+ * `204` is the only status that produces `undefined` here; a `200` whose body
+ * is missing `data` still yields `undefined` for the same structural reason,
+ * and every non-2xx is thrown as a typed error exactly as elsewhere.
+ *
+ * ⚠️ The error path decodes **defensively**, like {@link sendRaw} and unlike
+ * {@link sendJsonApi}. The upgrade route reads its query string with a bare
+ * Axum `Query` extractor, whose rejection is `400` with a **plain-text** body —
+ * not the JSON:API error document every handler-produced error uses. Parsing
+ * that strictly would raise a `TamgaParseError` about the body instead of the
+ * `400` about the request, hiding which of the four required query parameters
+ * was wrong behind a message about JSON.
+ */
+export async function sendJsonApiOptional<T>(
+  config: TransportConfig,
+  opts: RequestOptions,
+): Promise<TransportResult<T | undefined>> {
+  const url = buildUrl(config, opts.path, opts.query);
+  const headers = buildHeaders(
+    config,
+    opts.body !== undefined ? "application/vnd.api+json" : undefined,
+  );
+  const { response, text } = await doFetch(
+    url,
+    buildInit(opts.method, headers, opts.body),
+    config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+  );
+  const responseInfo = extractResponseInfo(response.headers);
+  if (!response.ok) {
+    let body: unknown;
+    try {
+      body = parseJsonText(text);
+    } catch {
+      body = undefined;
+    }
+    throw apiErrorFromResponseBody(response.status, body);
+  }
+  const envelope = parseJsonText(text) as { data?: T } | undefined;
+  return { data: envelope?.data, responseInfo };
+}
+
+/**
  * Sends a request expecting a flat (non-enveloped) JSON body — used only by
  * quick-validate today, which returns plain `application/json` with no
  * `data` key.

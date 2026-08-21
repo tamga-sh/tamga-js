@@ -20,7 +20,14 @@
 
 import { readFileSync } from "node:fs";
 
-import { TamgaClient, verifyAndDecryptMachineFile, verifyMachineFileWithClaims } from "../dist/index.js";
+import {
+  TamgaClient,
+  effectiveHeartbeatWindowMs,
+  heartbeatWindowMsFromMachine,
+  verifyAndDecryptMachineFile,
+  verifyMachineFileWithClaims,
+  MACHINE_HEARTBEAT_WINDOW_MS,
+} from "../dist/index.js";
 
 const client = new TamgaClient({
   accountId: "acct_smoke",
@@ -114,8 +121,38 @@ for (const name of fixtureNames) {
   }
 }
 
+// ── The heartbeat-window helpers, on every runtime ──────────────────────────
+//
+// Pure functions with no I/O, so a unit test proves the logic — what this
+// proves is that they are actually reachable from the built ESM entrypoint on
+// Deno and Bun, which a Node-only vitest run cannot show. A missing re-export
+// would otherwise surface as a downstream `undefined is not a function`.
+
+if (effectiveHeartbeatWindowMs({ id: "p", type: "policies", attributes: { heartbeat_duration: 60 } }) !== 60_000) {
+  throw new Error("smoke test failed: effectiveHeartbeatWindowMs did not read the policy window");
+}
+if (effectiveHeartbeatWindowMs({ id: "p", type: "policies", attributes: { heartbeat_duration: null } }) !== MACHINE_HEARTBEAT_WINDOW_MS) {
+  throw new Error("smoke test failed: effectiveHeartbeatWindowMs did not fall back to 600s");
+}
+
+const windowMs = heartbeatWindowMsFromMachine({
+  id: "m",
+  type: "machines",
+  attributes: {
+    last_heartbeat_at: "2026-08-21T00:00:00.000Z",
+    next_heartbeat_at: "2026-08-21T00:01:00.000Z",
+  },
+});
+if (windowMs !== 60_000) {
+  throw new Error(`smoke test failed: heartbeatWindowMsFromMachine returned ${windowMs}, expected 60000`);
+}
+
+// `dispose()` on a client with no timers must be a no-op, not a throw — a
+// teardown path calls it unconditionally.
+client.dispose();
+
 // Not linted by `pnpm lint` (scoped to src/test — see eslint.config.js);
 // console output is fine here, this is a script, not library code.
 console.log(
-  `smoke: dist/index.js loaded, TamgaClient constructed, constructor validation ran, and ${fixtureNames.length} server-produced machine files verified OK`,
+  `smoke: dist/index.js loaded, TamgaClient constructed, constructor validation ran, heartbeat-window helpers resolved, and ${fixtureNames.length} server-produced machine files verified OK`,
 );

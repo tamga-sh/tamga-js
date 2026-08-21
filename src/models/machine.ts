@@ -96,24 +96,35 @@ export interface MachineAttributes {
  * from it), see that field's doc for the exact recipe and its caveats. Learn
  * the window out of band only when no machine file is available.
  *
- * ⚠️ **Which responses can carry `DEAD` depends on how the row was
- * produced.** A response built off a row the request just wrote never can:
- * `pingHeartbeat` writes `last_heartbeat_at = NOW()` and then derives the
- * status from that same timestamp, so it answers `ALIVE` or `RESURRECTED`
- * and never `DEAD`; `resetHeartbeat` nulls the column (`NOT_STARTED`);
- * `createMachine` never sets it (`NOT_STARTED`); and license validate never
- * emits `HEARTBEAT_DEAD`.
+ * ⚠️ **Which responses can carry `DEAD` depends on what the request did to
+ * `last_heartbeat_at`** — not, as this was previously phrased, on whether the
+ * request wrote anything at all. A write that *sets* the column cannot report
+ * `DEAD`, because the status is then derived from the timestamp that write just
+ * put there: `pingHeartbeat` writes `last_heartbeat_at = NOW()` and so answers
+ * `ALIVE` or `RESURRECTED`; `resetHeartbeat` nulls it (`NOT_STARTED`);
+ * `createMachine` never sets it, and a null column is `NOT_STARTED` by
+ * definition. License validate never emits `HEARTBEAT_DEAD` either.
  *
- * A response built off a **read** can, and this SDK has two: machine
- * checkout resolves the machine through a lookup that joins the policy, so
- * the {@link Machine} that
+ * A write that leaves the column alone is **not** covered by that rule, and
+ * there is one: {@link import("../client.js").TamgaClient.updateMachine}.
+ * `PATCH /machines/{id}` touches `name`/`ip`/`hostname`/`platform`/`cores`/
+ * `memory`/`disk`/`metadata` and nothing else, so it still derives a status
+ * from whatever `last_heartbeat_at` already held — and its
+ * `UPDATE … RETURNING` joins no policy, so it judges that against the 600 s
+ * fallback instead of the policy's window. Its verdict can therefore differ
+ * from a read's in either direction. Do not read heartbeat state off a patch.
+ *
+ * A response built off a **read** carries a genuine verdict, and this SDK has
+ * four: {@link import("../client.js").TamgaClient.getMachine} and
+ * {@link import("../client.js").TamgaClient.listMachines}, machine checkout
+ * (so the {@link Machine} that
  * {@link import("../checkout/machineFile.js").verifyAndDecryptMachineFile}
- * returns carries a genuine staleness verdict and its `heartbeat_status` may
- * be `DEAD`; the `machine` half of
- * {@link import("../client.js").TamgaClient.generateOfflineProof} is built
- * the same way. (`GET /machines/{id}` would too — this SDK exposes no
- * machine read.) So branch on `DEAD` **there** if you have a use for it;
- * just never on a ping response, where it cannot appear.
+ * returns may read `DEAD`), and the `machine` half of
+ * {@link import("../client.js").TamgaClient.generateOfflineProof}. All four
+ * resolve through a lookup that joins the policy, so their status *and* their
+ * `next_heartbeat_at` are judged against the real window. So branch on `DEAD`
+ * **there** if you have a use for it; just never on a ping response, where it
+ * cannot appear.
  *
  * ⚠️ **And `DEAD` does not mean the machine was culled.** It means one
  * thing only: the last ping is older than the window. The row is still
@@ -228,4 +239,81 @@ export interface ProcessAttributes {
  */
 export function toPidString(pid: string | number): string {
   return typeof pid === "number" ? String(pid) : pid;
+}
+
+/**
+ * The divisor this SDK's schedulers apply to a heartbeat window to pick a ping
+ * interval: ping three times per window, so two consecutive pings can be lost
+ * without the machine falling outside it.
+ *
+ * Used by
+ * {@link import("../client.js").TamgaClient.startHeartbeatFromPolicy}; exported
+ * so a caller sizing its own timer off
+ * {@link heartbeatWindowMsFromMachine} reaches the same number.
+ *
+ * ⚠️ **The "two losses" promise does not survive the 1 s interval floor on a
+ * window shorter than 3 s.** For `heartbeat_duration` of 3 the floor and this
+ * divisor agree exactly (3 s / 3 = 1 s); below that the floor binds and the
+ * tolerance degrades — a 2 s window gets one spare ping, a 1 s window none.
+ * Steady state still holds the window in both cases, because the server judges
+ * on *truncated whole seconds* (`heartbeat_status_within` compares
+ * `(now - last).num_seconds() <= window_secs`, and `num_seconds()` truncates),
+ * so a machine reads DEAD only once its age reaches `window_secs + 1` seconds.
+ * That extra second is what makes a 1 s window serveable at a 1 s ping at all.
+ * The one window the floor cannot hold is `0`, whose whole grace *is* that
+ * second. See the interaction table in `test/policy-read.spec.ts`.
+ *
+ * ⚠️ Dividing by this is where the recommended composition goes wrong.
+ * `heartbeatWindowMsFromMachine` returns `number | undefined`, so
+ * `heartbeatWindowMsFromMachine(m)! / MACHINE_HEARTBEAT_INTERVAL_DIVISOR` —
+ * with the non-null assertion the type forces — is `NaN` whenever the machine
+ * has not been pinged yet. Handle the `undefined` explicitly instead.
+ */
+export const MACHINE_HEARTBEAT_INTERVAL_DIVISOR = 3;
+
+/**
+ * Recovers the **effective** heartbeat window, in milliseconds, from a machine
+ * that came back on a read path — `next_heartbeat_at - last_heartbeat_at`.
+ *
+ * This is the recipe {@link MachineAttributes.next_heartbeat_at} documents,
+ * written once so callers do not each re-derive it. Returns `undefined` when
+ * either timestamp is absent or unparseable, or when the difference is not
+ * positive.
+ *
+ * ⚠️ **Only meaningful on a read-backed machine.** The server computes
+ * `next_heartbeat_at` from whatever window the answering query had in hand, and
+ * only the read queries join the policy in. Pass one of:
+ *
+ * - {@link import("../client.js").TamgaClient.getMachine}
+ * - a machine from {@link import("../client.js").TamgaClient.listMachines}
+ * - {@link import("../checkout/machineFile.js").verifyAndDecryptMachineFile}
+ * - the `machine` half of
+ *   {@link import("../client.js").TamgaClient.generateOfflineProof}
+ *
+ * Pass a `pingHeartbeat`, `resetHeartbeat` or `createMachine` response and the
+ * answer is always the 600 000 ms fallback, whatever the policy says — those
+ * write paths carry no policy join. There is no field on the response that
+ * distinguishes the two, which is why this takes the machine and not a flag.
+ *
+ * When no machine file or read is available, ask the policy instead:
+ * {@link import("../client.js").TamgaClient.resolveHeartbeatWindowMs}.
+ *
+ * ⚠️ **`undefined` is a real, common return — do not assert it away.** It is
+ * what you get on any machine that has not been pinged yet, which includes
+ * every freshly activated one. The obvious next step,
+ * `heartbeatWindowMsFromMachine(m)! / MACHINE_HEARTBEAT_INTERVAL_DIVISOR`,
+ * is therefore `NaN` exactly when a scheduler is most likely to be starting
+ * up — and `NaN` is a delay `setInterval` turns into a 1 ms tick rather than
+ * refusing.
+ * {@link import("../client.js").TamgaClient.startHeartbeat} floors its
+ * interval so that can no longer flood the server, but the interval is still
+ * wrong. Branch on `undefined` and fall back to
+ * {@link import("../client.js").TamgaClient.startHeartbeatFromPolicy} or to a
+ * window learned out of band.
+ */
+export function heartbeatWindowMsFromMachine(machine: Machine): number | undefined {
+  const { last_heartbeat_at: last, next_heartbeat_at: next } = machine.attributes;
+  if (last === null || next === null) return undefined;
+  const windowMs = Date.parse(next) - Date.parse(last);
+  return Number.isFinite(windowMs) && windowMs > 0 ? windowMs : undefined;
 }
