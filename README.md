@@ -354,11 +354,12 @@ Things this SDK deliberately does not do, or cannot do yet.
   itself; hang re-activation off that. `startHeartbeat` swallows every ping
   failure, that 404 included, so a client that must react to deletion should
   drive `pingHeartbeat` on its own timer and catch `NotFoundError`.
-- **Ten of the 24 `ValidationCode` values are not reachable today.** They are
+- **Eight of the 24 `ValidationCode` values are not reachable today.** They are
   modelled for forward-compatibility (`src/models/validation.ts`); do not write
-  logic that depends on receiving one. (`ENTITLEMENTS_MISSING` and
-  `FINGERPRINT_SCOPE_MISMATCH` have since become reachable — the scope fields
-  behind them are enforced now.)
+  logic that depends on receiving one. `ENTITLEMENTS_MISSING` and
+  `FINGERPRINT_SCOPE_MISMATCH` are **not** among them any more — the scope
+  fields behind them are enforced now, so a scoped `validateById` really can
+  come back with either.
 
 ## Documentation
 

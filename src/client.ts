@@ -488,9 +488,14 @@ export class TamgaClient {
     try {
       machine = await this.createMachine(licenseId, fingerprint, opts);
     } catch (error) {
+      // Narrow here rather than trusting `createLimitValidationCode`'s
+      // internal `instanceof` check: the compiler cannot see that invariant
+      // through the helper's `unknown` parameter, and an `as` cast would
+      // silently outlive any change to it.
+      if (!(error instanceof TamgaApiErrorException)) throw error;
       const code = createLimitValidationCode(error);
       if (code === undefined) throw error;
-      createLimit = { code, detail: (error as TamgaApiErrorException).apiError.detail };
+      createLimit = { code, detail: error.apiError.detail };
     }
 
     const result = await this.validateById(licenseId, scope !== undefined ? { scope } : {});

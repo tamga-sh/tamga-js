@@ -3,11 +3,18 @@
  *
  * `ValidationCode` models all 24 wire values documented in the Tamga API
  * protocol specification §2, evaluated server-side in priority order on the
- * by-ID endpoint. Only 14 are currently reachable — the rest are declared in
- * the server's enum but never emitted (see that specification's Known
- * Server-Side Gaps #4). They are still modeled here for
+ * by-ID endpoint. Sixteen are currently reachable; the other eight are
+ * declared in the server's enum but never emitted (see that specification's
+ * Known Server-Side Gaps #4). The unreachable ones are still modeled here for
  * forward-compatibility: a server-side fix that wires one of them up should
  * not require an SDK type change.
+ *
+ * ⚠️ `ENTITLEMENTS_MISSING` and `FINGERPRINT_SCOPE_MISMATCH` **are reachable**
+ * — they left the unreachable set when the server started genuinely enforcing
+ * `scope.entitlements` and `scope.fingerprint`
+ * (`validate_license.rs::resolve_scope_facts`). A scoped `validateById` can
+ * return either, so code that dismisses them as forward-compat-only is wrong.
+ * See {@link import("./license.js").LicenseScope}.
  *
  * The trailing `| (string & {})` member is the standard TypeScript
  * "open union" escape hatch: it accepts any string at the type level
@@ -32,15 +39,18 @@ export type ValidationCode =
   | "TOO_MUCH_DISK"
   | "TOO_MANY_PROCESSES"
   | "TOO_MANY_USES"
+  // Also reachable: the server enforces `scope.entitlements` and
+  // `scope.fingerprint`, so a scoped `validateById` can fail with either of
+  // these — see `LicenseScope` in `./license.ts`.
+  | "ENTITLEMENTS_MISSING"
+  | "FINGERPRINT_SCOPE_MISMATCH"
   // Modeled but not reachable via this field today — see the Tamga API
   // protocol specification §2.
   | "NOT_FOUND"
   | "BANNED"
-  | "ENTITLEMENTS_MISSING"
   | "TOO_MANY_USERS"
   | "HEARTBEAT_DEAD"
   | "HEARTBEAT_NOT_STARTED"
-  | "FINGERPRINT_SCOPE_MISMATCH"
   | "COMPONENTS_SCOPE_MISMATCH"
   | "CHECKSUM_SCOPE_MISMATCH"
   | "VERSION_SCOPE_MISMATCH"

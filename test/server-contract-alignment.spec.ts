@@ -301,6 +301,28 @@ describe("request deadline", () => {
     await expect(unbounded.quickValidate("lic-1")).resolves.toMatchObject({ code: "VALID" });
   });
 
+  it("disarms the deadline once the request resolves", async () => {
+    // `doFetch`'s `finally { deadline.clear() }` is what stops a 45s abort
+    // timer being left armed behind every fast response — under Node a
+    // stack of them keeps the event loop alive and delays process exit.
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal(
+        "fetch",
+        vi
+          .fn()
+          .mockImplementation(() =>
+            Promise.resolve(jsonApi({ ts: "t", valid: true, detail: "ok", code: "VALID" })),
+          ),
+      );
+
+      await expect(client().quickValidate("lic-1")).resolves.toMatchObject({ code: "VALID" });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("attaches a fresh signal by default", async () => {
     const fetchMock = vi.fn().mockImplementation((_url: URL, init: RequestInit) => {
       expect(init.signal).toBeInstanceOf(AbortSignal);

@@ -48,3 +48,10 @@ revives the machine — so a scheduler must keep pinging through `DEAD`, and
 re-activation belongs. Docs, JSDoc and the `docs/examples/machine-heartbeat.ts`
 example are updated accordingly, and the scheduler now has a regression test
 proving it keeps pinging across three consecutive `DEAD` responses.
+
+`ValidationCode`'s own doc is brought in line with the enforced scope fields:
+`ENTITLEMENTS_MISSING` and `FINGERPRINT_SCOPE_MISMATCH` move out of the
+"modeled but not reachable" group, so the reachable count goes from 14 to 16
+(and the unreachable one from ten to eight) in `src/models/validation.ts`,
+`README.md` and `CLAUDE.md`. The union itself is unchanged — all 24 literals
+plus the `string & {}` escape hatch are still there.
