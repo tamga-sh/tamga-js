@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { TamgaClient } from "../src/client.js";
+import { TamgaClient, MAX_PAGE_SIZE } from "../src/client.js";
 import { mockJsonApiResponse, lastCall } from "./helpers/mockFetch.js";
 
 afterEach(() => {
@@ -25,11 +25,11 @@ describe("TamgaClient.listComponents", () => {
     expect(url.searchParams.get("page[after]")).toBe("c-0");
   });
 
-  it("omits pagination params when not supplied", async () => {
+  it("sends the server maximum as limit when none is supplied, rather than letting it default to 25", async () => {
     const fetchMock = mockJsonApiResponse([]);
     await client().listComponents("m-1");
     const [url] = lastCall(fetchMock);
-    expect(url.searchParams.has("limit")).toBe(false);
+    expect(url.searchParams.get("limit")).toBe(String(MAX_PAGE_SIZE));
     expect(url.searchParams.has("page[after]")).toBe(false);
   });
 });

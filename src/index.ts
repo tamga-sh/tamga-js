@@ -12,13 +12,20 @@
  *   the relevant public key is embedded in the calling application.
  * - The `TamgaError` hierarchy — match on the stable `.code`/`.kind`, never on
  *   `.message`.
+ *
+ * ⚠️ **Auth is enforced server-side, and a license key is not automatically a
+ * valid credential.** `Authorization: License <key>` is accepted only when the
+ * license's policy sets `authentication_strategy` to `"LICENSE"` or `"MIXED"`;
+ * the column defaults to `"TOKEN"`, under which every call returns
+ * `401 LICENSE_NOT_ALLOWED` — a configuration precondition, not something a
+ * retry or a different key can fix.
  */
 
-export { TamgaClient } from "./client.js";
+export { TamgaClient, MAX_PAGE_SIZE } from "./client.js";
 export type { TamgaClientConfig, CreateMachineOptions, ListOptions } from "./client.js";
 
 export type { AuthCredentials, BasicAuthForm, TransportConfig, ResponseInfo } from "./transport.js";
-export { sanitizeVersion, DEFAULT_API_VERSION } from "./transport.js";
+export { sanitizeVersion, DEFAULT_API_VERSION, DEFAULT_TIMEOUT_MS } from "./transport.js";
 
 export type {
   ValidationCode,
@@ -73,6 +80,14 @@ export {
   LicenseKeyMissingError,
   SchemeNotSupportedError,
   DatasetInvalidError,
+  MachineLimitExceededError,
+  CoreLimitExceededError,
+  MemoryLimitExceededError,
+  DiskLimitExceededError,
+  TooManyProcessesError,
+  LicenseSuspendedError,
+  LicenseExpiredError,
+  LicenseNotAllowedError,
   CheckoutError,
   ProofError,
   parseApiErrors,

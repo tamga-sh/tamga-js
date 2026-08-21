@@ -9,10 +9,20 @@
  * required in both singleplayer and multiplayer server modes (Tamga API
  * protocol specification §1); there is no mode where it can be omitted.
  *
- * No auth is currently enforced server-side on the license validate/
- * check-in endpoints, but this client sends whatever `auth` transport is
- * configured on every request anyway, for forward-compatibility — see
- * `src/transport.ts`.
+ * Auth **is** enforced server-side. Configure an `auth` transport — every
+ * method below sends it.
+ *
+ * ⚠️ A license key is not automatically a valid credential. The server
+ * accepts `Authorization: License <key>` only when the license's policy sets
+ * `authentication_strategy` to `"LICENSE"` or `"MIXED"`, and that column
+ * defaults to `"TOKEN"`. Against a default policy every call here returns
+ * `401 LICENSE_NOT_ALLOWED` until the policy is changed — see
+ * `src/models/policy.ts`'s `AuthenticationStrategy`.
+ *
+ * A license-key credential also cannot reach every endpoint it can name:
+ * {@link TamgaClient.resetHeartbeat} and
+ * {@link TamgaClient.generateOfflineProof} are role-gated and always answer
+ * `403` for it.
  */
 
 import {
@@ -23,6 +33,7 @@ import {
   type AuthCredentials,
   type TransportConfig,
 } from "./transport.js";
+import { TamgaApiErrorException } from "./errors.js";
 import type { License, LicenseScope } from "./models/license.js";
 import type { Entitlement } from "./models/license.js";
 import type { LicenseValidationResult, ValidationCode, ValidationResult } from "./models/validation.js";
@@ -45,14 +56,21 @@ export interface TamgaClientConfig {
   /** `Tamga-Version` header value. Server default is `"1.8"` if omitted. */
   apiVersion?: string;
   /**
-   * Auth transport used to authenticate every request. Optional — but the
-   * Tamga API protocol specification recommends every caller configure
-   * `{ kind: "license", key }` for forward-compatibility with auth
-   * enforcement landing server-side later.
+   * Auth transport used to authenticate every request. Optional at the type
+   * level only — auth is enforced server-side, so an unauthenticated client
+   * gets `401` from every endpoint. `{ kind: "license", key }` is the
+   * transport embedded/client applications want, subject to the policy's
+   * `authentication_strategy` (see this module's doc comment).
    */
   auth?: AuthCredentials;
   /** `Tamga-OTP` header value (TOTP 2FA code), sent on every request when set. */
   otp?: string;
+  /**
+   * Per-attempt request deadline in milliseconds. Defaults to
+   * {@link import("./transport.js").DEFAULT_TIMEOUT_MS} (45s). Pass `0` to
+   * disable the deadline and wait indefinitely.
+   */
+  timeoutMs?: number;
 }
 
 /** Optional attributes for {@link TamgaClient.createMachine}/{@link TamgaClient.activateMachine}. */
@@ -62,15 +80,86 @@ export interface CreateMachineOptions {
   hostname?: string;
   platform?: string;
   cores?: number;
+  /**
+   * Reported memory in **megabytes** — not bytes.
+   *
+   * ⚠️ The server sums this across the license's machines and checks it
+   * against `policy.max_memory`. Reporting 16 GB as `17179869184` inflates
+   * that tally by a factor of ~1e6 and gets the next activation on the same
+   * license refused with `MEMORY_LIMIT_EXCEEDED`. 16 GB is `16384`.
+   */
   memory?: number;
+  /** Reported disk in **megabytes** — not bytes. Same caveat as {@link memory}. */
   disk?: number;
   metadata?: Record<string, unknown>;
 }
 
-/** Pagination options shared by every keyset-paginated list endpoint. */
+/** Pagination options shared by the list endpoints. */
 export interface ListOptions {
+  /**
+   * Page size, clamped to `[1, 100]` server-side. Omitted means
+   * {@link MAX_PAGE_SIZE} — **not** the server's own default of 25, which
+   * truncates silently because the response carries no total, no
+   * `meta.page`, and no `links`.
+   */
   limit?: number;
+  /**
+   * Keyset cursor: the `id` of the last item on the previous page.
+   *
+   * ⚠️ Honoured by `listComponents` only.
+   * {@link TamgaClient.listEntitlements} ignores it — the server does too,
+   * because that listing unions two tables and no single cursor describes
+   * it. Kept on the shared type for signature compatibility.
+   */
   after?: string;
+}
+
+/**
+ * The server's maximum (and this SDK's default) page size for list
+ * endpoints. Sent explicitly whenever the caller gives no `limit`, so the
+ * page boundary is a known number rather than the server's silent 25.
+ */
+export const MAX_PAGE_SIZE = 100;
+
+/**
+ * Drops the scope fields the server rejects outright.
+ *
+ * `version`/`checksum` make the server answer `422 SCOPE_NOT_SUPPORTED`
+ * before any validation runs, so forwarding them would convert a caller's
+ * working validate into a total failure. Dropping them degrades to a
+ * validate that simply doesn't apply those two constraints — which is what
+ * the caller already believed was happening.
+ */
+function enforceableScope(scope: LicenseScope): LicenseScope {
+  const { version: _version, checksum: _checksum, ...enforceable } = scope;
+  return enforceable;
+}
+
+/**
+ * Create-time `422` limit codes, mapped to the equivalent validate-time
+ * {@link ValidationCode}.
+ *
+ * The server runs the same limit through two vocabularies: `POST /machines`
+ * refuses with `MACHINE_LIMIT_EXCEEDED`, while `POST .../actions/validate`
+ * reports the identical condition as `TOO_MANY_MACHINES`. Which one a caller
+ * sees depends only on the policy's `overage_strategy`, so
+ * {@link TamgaClient.activateMachine} normalizes onto the validate-time
+ * vocabulary and callers only have to branch once.
+ */
+const CREATE_LIMIT_CODE_TO_VALIDATION_CODE: Readonly<Record<string, ValidationCode>> = {
+  MACHINE_LIMIT_EXCEEDED: "TOO_MANY_MACHINES",
+  CORE_LIMIT_EXCEEDED: "TOO_MANY_CORES",
+  MEMORY_LIMIT_EXCEEDED: "TOO_MUCH_MEMORY",
+  DISK_LIMIT_EXCEEDED: "TOO_MUCH_DISK",
+};
+
+/**
+ * Returns the validate-time {@link ValidationCode} equivalent to `error`'s
+ * create-time limit code, or `undefined` if `error` is anything else.
+ */
+function createLimitValidationCode(error: unknown): ValidationCode | undefined {
+  if (!(error instanceof TamgaApiErrorException)) return undefined;
+  return CREATE_LIMIT_CODE_TO_VALIDATION_CODE[error.code];
 }
 
 /** `ValidationCode`s that represent an over-limit outcome — see {@link TamgaClient.activateMachine}. */
@@ -110,6 +199,7 @@ export class TamgaClient {
       ...(config.apiVersion !== undefined ? { apiVersion: config.apiVersion } : {}),
       ...(config.auth !== undefined ? { auth: config.auth } : {}),
       ...(config.otp !== undefined ? { otp: config.otp } : {}),
+      ...(config.timeoutMs !== undefined ? { timeoutMs: config.timeoutMs } : {}),
     };
   }
 
@@ -127,9 +217,20 @@ export class TamgaClient {
   }
 
   /**
-   * `POST /licenses/{license_id}/actions/validate` — scoped. Only
-   * `product`/`policy`/`user`/`environment` on `scope` are enforced
-   * server-side today (Tamga API protocol specification §2).
+   * `POST /licenses/{license_id}/actions/validate` — scoped.
+   *
+   * Six scope fields are enforced server-side:
+   * `product`/`policy`/`user`/`environment`, plus `entitlements` (matched on
+   * entitlement **codes**, case-insensitively, across both direct and
+   * policy-inherited rows) and `fingerprint` (matched against any machine on
+   * the license). See {@link LicenseScope}.
+   *
+   * ⚠️ `scope.version` and `scope.checksum` are **stripped before sending**.
+   * The server answers `422 SCOPE_NOT_SUPPORTED` to a scope carrying either
+   * and never runs the validation at all, so passing them through would turn
+   * a working validate into a hard failure. They are deprecated; stop
+   * setting them.
+   *
    * `skipTouch: true` suppresses the `last_validated_at` side effect.
    */
   async validateById(
@@ -139,7 +240,7 @@ export class TamgaClient {
     const meta: { scope?: LicenseScope; skip_touch: boolean } = {
       skip_touch: opts.skipTouch ?? false,
     };
-    if (opts.scope !== undefined) meta.scope = opts.scope;
+    if (opts.scope !== undefined) meta.scope = enforceableScope(opts.scope);
     const { data, meta: validationMeta } = await sendJsonApiWithMeta<License, LicenseValidationResult>(
       this.transport,
       { method: "POST", path: `/licenses/${licenseId}/actions/validate`, body: { meta } },
@@ -150,7 +251,29 @@ export class TamgaClient {
   /**
    * `GET /licenses/{license_id}/actions/validate` — quick-validate. Flat
    * `{ ts, valid, detail, code }` body, no `data` envelope — cheaper than
-   * {@link validateById} when the caller only needs the outcome.
+   * {@link validateById} when the caller only needs the outcome. No scope
+   * support on this route.
+   *
+   * ⚠️ **This call does not always record the validation.** The server skips
+   * the `last_validated_at` write whenever the request carries an `Origin`
+   * header, and the response is byte-identical either way — there is no
+   * signal to branch on.
+   *
+   * That matters most in a browser, this SDK's first-class runtime: the
+   * browser attaches `Origin` to a cross-origin `fetch` itself and script
+   * cannot suppress it, so quick-validate from a browser **never** records a
+   * validation. A license whose `machines_count` is 0 and whose
+   * `last_validated_at` is still null reads as `INACTIVE`, and the server's
+   * check-in-overdue worker keeps firing `license.check-in-overdue` webhooks
+   * off the same column. Check-in does not help — it writes
+   * `last_check_in_at`, a different column.
+   *
+   * Outside a browser, a `{ kind: "cookie" }` auth transport sends `Origin`
+   * too, and any proxy is free to add one.
+   *
+   * If the validation has to be recorded, call {@link validateById} — the
+   * `POST` route has no `Origin` branch and writes unconditionally unless
+   * `skipTouch: true` is passed.
    */
   async quickValidate(licenseId: string): Promise<LicenseValidationResult> {
     const { data } = await sendFlat<LicenseValidationResult>(this.transport, {
@@ -270,9 +393,24 @@ export class TamgaClient {
    * `(account_id, license_id, fingerprint)` — a duplicate fingerprint on
    * the same license throws {@link import("./errors.js").FingerprintTakenError}.
    *
-   * **No machine/core/etc. limit is checked at creation time** — those
-   * limits only surface later via {@link validateById}. See
-   * {@link activateMachine} for the recommended create→validate flow.
+   * ⚠️ **Creation does run the machine/core/memory/disk limit checks** —
+   * they are not all deferred to validate. Whether they fire here depends on
+   * the policy's `overage_strategy`, because the create-time check is routed
+   * through it:
+   *
+   * - Under `NO_OVERAGE`, an over-limit create is refused with `422`
+   *   `MACHINE_LIMIT_EXCEEDED` / `CORE_LIMIT_EXCEEDED` /
+   *   `MEMORY_LIMIT_EXCEEDED` / `DISK_LIMIT_EXCEEDED`.
+   * - Under `ALLOW_ACCESS` / `ALLOW_1_25X_OVERAGE` / … the create succeeds
+   *   and the same condition surfaces later as a `TOO_MANY_*` / `TOO_MUCH_*`
+   *   {@link ValidationCode}.
+   *
+   * The two paths use different vocabularies for the same limit;
+   * {@link activateMachine} normalizes them onto the validate-time one.
+   *
+   * Note also that the fingerprint-uniqueness pre-check runs **before** the
+   * limit checks, so re-registering an existing fingerprint reports
+   * `FINGERPRINT_TAKEN` rather than a limit error.
    */
   async createMachine(
     licenseId: string,
@@ -307,17 +445,35 @@ export class TamgaClient {
 
   /**
    * `createMachine` + {@link validateById} composed into the recommended
-   * "activate machine" flow — creation alone doesn't enforce limits (see
-   * {@link createMachine}'s doc comment).
+   * "activate machine" flow.
    *
-   * If validation fails with an over-limit {@link ValidationCode}
-   * (`TOO_MANY_MACHINES`, `TOO_MANY_CORES`, `TOO_MUCH_MEMORY`,
-   * `TOO_MUCH_DISK`, `TOO_MANY_PROCESSES`) and `autoDeleteOnOverage` is
-   * `true`, the just-created machine is deleted before returning — SDK does
-   * not auto-delete unless the caller opts in. Deletion failures are not
-   * surfaced (the validation result is what the caller asked for); a
-   * machine left behind after a failed auto-delete is still visible to
-   * normal machine-management calls for manual cleanup.
+   * A license limit can stop an activation at either of two points, and
+   * which one depends on the policy's `overage_strategy` (see
+   * {@link createMachine}). Both are handled here and both come back as a
+   * single `ValidationResult` shape, so callers branch on `meta.code` once:
+   *
+   * - **Refused at create time** (`NO_OVERAGE`). The `422`'s code is
+   *   normalized onto the validate-time vocabulary —
+   *   `MACHINE_LIMIT_EXCEEDED` → `TOO_MANY_MACHINES`, `CORE_LIMIT_EXCEEDED`
+   *   → `TOO_MANY_CORES`, `MEMORY_LIMIT_EXCEEDED` → `TOO_MUCH_MEMORY`,
+   *   `DISK_LIMIT_EXCEEDED` → `TOO_MUCH_DISK` — and returned with
+   *   `valid: false` and the server's own `detail`. No machine was created,
+   *   so nothing is rolled back and `autoDeleteOnOverage` does not apply.
+   *   The license resource still comes from a real validate call, so
+   *   `license.attributes` is current.
+   * - **Reported at validate time** (any overage-permitting strategy). The
+   *   machine exists and counts against the license. If
+   *   `autoDeleteOnOverage` is `true` and the code is one of
+   *   `TOO_MANY_MACHINES` / `TOO_MANY_CORES` / `TOO_MUCH_MEMORY` /
+   *   `TOO_MUCH_DISK` / `TOO_MANY_PROCESSES`, the just-created machine is
+   *   deleted before returning. The SDK does not auto-delete unless the
+   *   caller opts in. Deletion failures are not surfaced (the validation
+   *   result is what the caller asked for); a machine left behind after a
+   *   failed auto-delete is still visible to normal machine-management calls
+   *   for manual cleanup.
+   *
+   * Every other create-time failure — `FINGERPRINT_TAKEN`,
+   * `LICENSE_NOT_ALLOWED`, a network error — is thrown, unchanged.
    */
   async activateMachine(
     licenseId: string,
@@ -326,10 +482,31 @@ export class TamgaClient {
     scope?: LicenseScope,
     autoDeleteOnOverage = false,
   ): Promise<ValidationResult> {
-    const machine = await this.createMachine(licenseId, fingerprint, opts);
+    let machine: Machine | undefined;
+    let createLimit: { code: ValidationCode; detail: string } | undefined;
+
+    try {
+      machine = await this.createMachine(licenseId, fingerprint, opts);
+    } catch (error) {
+      const code = createLimitValidationCode(error);
+      if (code === undefined) throw error;
+      createLimit = { code, detail: (error as TamgaApiErrorException).apiError.detail };
+    }
+
     const result = await this.validateById(licenseId, scope !== undefined ? { scope } : {});
 
-    if (autoDeleteOnOverage && OVERAGE_CODES.has(result.meta.code)) {
+    if (createLimit !== undefined) {
+      // The create-time check is `count + 1 > max`, validate's is
+      // `count > max` — so a license sitting exactly on its limit refuses the
+      // create and then reports VALID. The create-time verdict is the one
+      // that describes what just happened.
+      return {
+        license: result.license,
+        meta: { ts: result.meta.ts, valid: false, detail: createLimit.detail, code: createLimit.code },
+      };
+    }
+
+    if (autoDeleteOnOverage && machine !== undefined && OVERAGE_CODES.has(result.meta.code)) {
       await this.deleteMachine(machine.id).catch(() => undefined);
     }
 
@@ -345,7 +522,20 @@ export class TamgaClient {
     return data;
   }
 
-  /** `POST /machines/{machine_id}/actions/reset-heartbeat` — no body, rewinds heartbeat state to `NOT_STARTED`. */
+  /**
+   * `POST /machines/{machine_id}/actions/reset-heartbeat` — no body, rewinds
+   * heartbeat state to `NOT_STARTED`.
+   *
+   * ⚠️ **Role-gated: always `403` for a license-key credential.** The server
+   * restricts this to admin, developer, product-token and environment-token
+   * roles; the license-key role is not among them, regardless of the
+   * permissions attached to it. (Contrast {@link pingHeartbeat}, which is
+   * permission-only and works for a license key.)
+   *
+   * This is the only server-side way to unstick a machine whose heartbeat
+   * job is wedged — so a license-key client has no recovery path here and
+   * should not offer one to its users.
+   */
   async resetHeartbeat(machineId: string): Promise<Machine> {
     const { data } = await sendJsonApi<Machine>(this.transport, {
       method: "POST",
@@ -387,6 +577,13 @@ export class TamgaClient {
    * server-side with `422 DATASET_INVALID`). Pass the returned `proof`,
    * plus the exact `accountId`/`machineId`/`fingerprint`/`dataset` tuple
    * used here, to `verifyOfflineProof` to verify it fully offline.
+   *
+   * ⚠️ **Role-gated: always `403` for a license-key credential**, same as
+   * {@link resetHeartbeat} — the license-key role is not on the allowed list
+   * even though it carries the `machine.proofs.generate` permission. Proofs
+   * have to be minted by a backend holding an account-level token and then
+   * handed to the client; `verifyOfflineProof` (which needs no credential at
+   * all) is the half an embedded client can run.
    */
   async generateOfflineProof(
     machineId: string,
@@ -425,12 +622,21 @@ export class TamgaClient {
     return data;
   }
 
-  /** `GET /machines/{machine_id}/components` — keyset-paginated (`limit`, `page[after]`). */
+  /**
+   * `GET /machines/{machine_id}/components` — genuinely keyset-paginated
+   * (`limit`, `page[after]`), unlike {@link listEntitlements}.
+   *
+   * `limit` is clamped to 100 server-side and defaults to **25** when
+   * omitted. The response carries no `meta.page` and no `links`, so a short
+   * page is the only end-of-list signal — which means the page size has to be
+   * known. This SDK sends 100 when no explicit `limit` is given; pass
+   * `after` with the last item's `id` to walk further.
+   */
   async listComponents(machineId: string, opts: ListOptions = {}): Promise<Component[]> {
     const { data } = await sendJsonApi<Component[]>(this.transport, {
       method: "GET",
       path: `/machines/${machineId}/components`,
-      query: { limit: opts.limit, "page[after]": opts.after },
+      query: { limit: opts.limit ?? MAX_PAGE_SIZE, "page[after]": opts.after },
     });
     return data;
   }
@@ -440,6 +646,10 @@ export class TamgaClient {
    * (non-JSON:API) request body shape as {@link createComponent}. Unique
    * PID per machine. Unlike a machine (which starts `NOT_STARTED`), a
    * process starts `ALIVE` immediately.
+   *
+   * Spawning is limit-checked: a license already at `policy.max_processes`
+   * gets `422 TOO_MANY_PROCESSES` (see
+   * {@link import("./errors.js").TooManyProcessesError}).
    */
   async createProcess(
     machineId: string,
@@ -485,21 +695,42 @@ export class TamgaClient {
   // ---------------------------------------------------------------------
 
   /**
-   * `GET /licenses/{license_id}/entitlements` — keyset-paginated. Despite
-   * the URL nesting, returns full {@link Entitlement} resources, not
-   * lightweight junction records. No auth/permission check beyond the
-   * license existing.
+   * `GET /licenses/{license_id}/entitlements` — returns full
+   * {@link Entitlement} resources despite the junction-shaped URL, unioning
+   * the license's direct attachments with the ones inherited from its
+   * policy. Check {@link EntitlementAttributes.inherited} to tell them apart.
+   *
+   * ⚠️ **This route is not paginable.** The response is a union across two
+   * tables, so a single keyset cursor cannot describe it and the server
+   * ignores `page[after]` outright — sending it would silently re-fetch page
+   * one forever. {@link ListOptions.after} is accepted here for signature
+   * compatibility and deliberately **not** sent.
+   *
+   * `limit` is the only bound, clamped to 100 server-side and defaulting to
+   * **25** when omitted — which is a silent truncation, since the response
+   * carries no `meta.page`, no `links`, and no total. This SDK sends 100 (the
+   * server maximum) when no explicit `limit` is given, so the ceiling is
+   * knowable. A license with more than 100 effective entitlements cannot be
+   * fully enumerated through this endpoint at all.
    */
   async listEntitlements(licenseId: string, opts: ListOptions = {}): Promise<Entitlement[]> {
     const { data } = await sendJsonApi<Entitlement[]>(this.transport, {
       method: "GET",
       path: `/licenses/${licenseId}/entitlements`,
-      query: { limit: opts.limit, "page[after]": opts.after },
+      query: { limit: opts.limit ?? MAX_PAGE_SIZE },
     });
     return data;
   }
 
-  /** `GET /licenses/{license_id}/entitlements/{entitlement_id}`. */
+  /**
+   * `GET /licenses/{license_id}/entitlements/{entitlement_id}`.
+   *
+   * ⚠️ Resolves **direct** attachments only. An entitlement the license
+   * inherits from its policy is returned by {@link listEntitlements} but
+   * answers `404` here, so list-then-get-each is not a valid pattern on this
+   * resource. Read the fields off the list response instead, or check
+   * {@link EntitlementAttributes.inherited} before calling this.
+   */
   async getEntitlement(licenseId: string, entitlementId: string): Promise<Entitlement> {
     const { data } = await sendJsonApi<Entitlement>(this.transport, {
       method: "GET",
@@ -509,12 +740,17 @@ export class TamgaClient {
   }
 
   /**
-   * Fetches this license's entitlements (a single page, up to `limit`,
-   * default 100 — the server's own max page size) and checks whether any
-   * has the given `code`. Matches on `code` (the stable, developer-facing
-   * identifier) — **never** on `name` (just a display label). For licenses
-   * with more entitlements than fit on one page, paginate via
-   * {@link listEntitlements} directly instead.
+   * Fetches this license's entitlements (up to `limit`, default 100 — the
+   * server's own maximum) and checks whether any has the given `code`.
+   * Matches on `code` (the stable, developer-facing identifier) — **never**
+   * on `name` (just a display label). Inherited entitlements count: the
+   * listing this reads is the union of direct and policy-inherited rows.
+   *
+   * ⚠️ A `false` result is only authoritative below that 100-row ceiling.
+   * The endpoint cannot be paginated (see {@link listEntitlements}), so on a
+   * license with more than 100 effective entitlements this can answer
+   * `false` for a code the license actually holds. Do not gate a paid
+   * feature on a `false` from an unbounded catalogue.
    */
   async hasEntitlement(licenseId: string, code: string, limit = 100): Promise<boolean> {
     const entitlements = await this.listEntitlements(licenseId, { limit });

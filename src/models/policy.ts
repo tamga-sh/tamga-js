@@ -138,15 +138,23 @@ export type CheckInInterval = "day" | "week" | "month" | "year";
  * Named recognized values for the free-text `expiration_strategy` policy
  * field — the server branches on literal string match, not a closed enum,
  * so this is documentation/autocomplete only, not a validated type.
- * `"RESTRICT_ACCESS"` is the default; `"MAINTAIN_ACCESS"`/`"ALLOW_ACCESS"`
- * permit access after expiry. Any value outside this list is branched as
- * "deny/default" server-side — treat unrecognized values the same way
- * client-side.
+ * `"RESTRICT_ACCESS"` is the default. Any value outside this list is
+ * branched as "deny/default" server-side — treat unrecognized values the
+ * same way client-side.
+ *
+ * The distinction that matters at the **auth gate**: under
+ * `"MAINTAIN_ACCESS"` / `"ALLOW_ACCESS"` / `"RESTRICT_ACCESS"` an expired
+ * license still authenticates, and the expiry shows up as an `EXPIRED`
+ * validation code on a 200 response. Under `"REVOKE_ACCESS"` the credential
+ * itself is rejected with `401 LICENSE_EXPIRED` — see
+ * {@link import("../errors.js").LicenseExpiredError} — so no endpoint,
+ * including validate, is reachable at all.
  */
 export const ExpirationStrategy = {
   RESTRICT_ACCESS: "RESTRICT_ACCESS",
   MAINTAIN_ACCESS: "MAINTAIN_ACCESS",
   ALLOW_ACCESS: "ALLOW_ACCESS",
+  REVOKE_ACCESS: "REVOKE_ACCESS",
 } as const;
 
 /**
@@ -162,14 +170,22 @@ export const RenewalBasis = {
 
 /**
  * Named recognized values for the free-text `authentication_strategy`
- * policy field. `"TOKEN"` is the default; `"LICENSE"`/`"MIXED"` permit
- * license-key bearer auth. See {@link ExpirationStrategy}'s doc comment for
- * the "free-text, not a closed enum" caveat — it applies here too.
+ * policy field. See {@link ExpirationStrategy}'s doc comment for the
+ * "free-text, not a closed enum" caveat — it applies here too.
+ *
+ * ⚠️ **License-key auth is off by default.** The server accepts an
+ * `Authorization: License <key>` credential only under `"LICENSE"` or
+ * `"MIXED"`; the column defaults to `"TOKEN"`, and `"NONE"` behaves the same
+ * way `"TOKEN"` does at this gate. Under either, every call made with
+ * `{ kind: "license", key }` comes back `401 LICENSE_NOT_ALLOWED` — a
+ * configuration precondition, not a retryable auth failure. See
+ * {@link import("../errors.js").LicenseNotAllowedError}.
  */
 export const AuthenticationStrategy = {
   TOKEN: "TOKEN",
   LICENSE: "LICENSE",
   MIXED: "MIXED",
+  NONE: "NONE",
 } as const;
 
 /** The `policies` JSON:API resource: `{ id, type, attributes }`. */

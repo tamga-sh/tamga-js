@@ -84,8 +84,18 @@ method sends whatever `auth` transport was configured.
 | `getEntitlement(licenseId, entitlementId)` | `GET /licenses/{id}/entitlements/{entitlementId}` |
 | `hasEntitlement(licenseId, code, limit?)` | convenience wrapper around `listEntitlements` |
 
+Four of these need a caveat before you wire them in:
+
+- `quickValidate` does not record the validation when the request carries an
+  `Origin` header — which a browser always adds. See **Known gaps**.
+- `resetHeartbeat` and `generateOfflineProof` are role-gated and always `403`
+  for a license-key credential. See **Auth transports**.
+- `listEntitlements` ignores `after`: that route is not paginable server-side.
+- `createMachine`'s `memory` / `disk` are **megabytes**.
+
 Errors are typed subclasses of `TamgaError` (`NotFoundError`,
-`FingerprintTakenError`, `CheckInNotRequiredError`, …). Match on the stable
+`FingerprintTakenError`, `MachineLimitExceededError`,
+`LicenseNotAllowedError`, `CheckInNotRequiredError`, …). Match on the stable
 `.code`, never on `.message` / `.detail`.
 
 More runnable examples — scoped validation, machine heartbeats, offline `.lic` /
@@ -123,6 +133,27 @@ Tokens are treated as opaque strings throughout — there is no prefix-based typ
 detection. A raw license key embedded in browser-shipped code is inherently
 visible to the end user; that is expected for the `license` transport. Never
 embed a Bearer or Basic *account* credential in client-side code.
+
+> [!IMPORTANT]
+> **Auth is enforced server-side, and a license key is not automatically a
+> valid credential.** The server accepts `Authorization: License <key>` only
+> when the license's policy sets `authentication_strategy` to `"LICENSE"` or
+> `"MIXED"`. That column **defaults to `"TOKEN"`**, and `"NONE"` rejects the
+> key the same way — so against a default policy every call returns
+> `401 LICENSE_NOT_ALLOWED` (`LicenseNotAllowedError`). It is a configuration
+> precondition, not a retryable auth failure: no retry, key rotation, or
+> re-prompt can fix it, only a policy change.
+>
+> Two further limits on a license-key credential:
+>
+> - `resetHeartbeat` and `generateOfflineProof` are **role**-gated, not
+>   permission-gated, and always answer `403` for it. Proofs have to be minted
+>   by a backend holding an account-level token; `verifyOfflineProof` needs no
+>   credential and is the half a client can run.
+> - An expired license whose policy uses `expiration_strategy:
+>   "REVOKE_ACCESS"` is rejected at the auth gate with `401 LICENSE_EXPIRED`,
+>   so validate is not reachable to report the expiry. Under the other three
+>   strategies it authenticates and comes back as an `EXPIRED` validation code.
 
 ## Offline verification
 
@@ -233,12 +264,18 @@ claim below names the code that implements it.
   and capped at 60s (`src/transport.ts::parseRetryAfter`,
   `src/transport.ts::retryDelayMs`); without it, exponential backoff with jitter
   so a fleet does not reconverge into the spike it was backing off from. Retries
-  are scoped to `GET` plus five effectively-idempotent `POST` actions —
-  `validate`, `validate-key`, `check-in`, `check-out`, `ping`
-  (`src/transport.ts::isRetryable`). **Creates are deliberately excluded**:
-  retrying `POST /machines` can burn a second seat, and only you know whether
-  that is acceptable. The budget is three retries
-  (`src/transport.ts::doFetch`).
+  are scoped to `GET` plus seven effectively-idempotent `POST` actions —
+  `validate`, `validate-key`, `check-in`, `check-out`, `ping`,
+  `ping-heartbeat`, `reset-heartbeat` (`src/transport.ts::isRetryable`).
+  **Creates are deliberately excluded**: retrying `POST /machines` can burn a
+  second seat, and only you know whether that is acceptable. The budget is
+  three retries (`src/transport.ts::doFetch`).
+- **Requests have a deadline.** Each attempt is capped at
+  `DEFAULT_TIMEOUT_MS` (45s), overridable per client via
+  `TamgaClientConfig.timeoutMs`, or disabled with `0`. It sits deliberately
+  past the API's own 30s gateway timeout so the server wins that race and you
+  get its `504` — the response that carries the `X-Request-Id` support needs
+  — instead of an opaque local abort.
 
 Reporting a vulnerability: see [`SECURITY.md`](./SECURITY.md).
 
@@ -259,13 +296,50 @@ Things this SDK deliberately does not do, or cannot do yet.
   is not plumbed through `TamgaClientConfig`.
 - **`X-RateLimit-*` response headers are unavailable** — no server handler sets
   them, so `Retry-After` on a 429 is the only rate-limit signal to read.
-- **No release / auto-update checking.** Not implemented in any form.
+- **No release / auto-update checking.** Not implemented in any form. (Earlier
+  versions of this note claimed the upgrade endpoint crashed at runtime and
+  that no artifact-download route existed. Both were wrong: the upgrade
+  handler is live and public, and the download route exists. Not shipping a
+  release-check method is a scope decision here, not a server limitation.)
+- **`GET /licenses/{id}/entitlements` cannot be paginated.** The listing is a
+  union of the license's direct entitlements and the ones inherited from its
+  policy, so no single keyset cursor describes it and the server ignores
+  `page[after]`. `listEntitlements` sends the server maximum (`limit=100`)
+  when you give no explicit limit, and does not send the cursor;
+  `ListOptions.after` is accepted on the shared type but has no effect on
+  this route. A license with more than 100 effective entitlements cannot be
+  fully enumerated, so a `false` from `hasEntitlement` is only authoritative
+  below that ceiling. `listComponents` is unaffected — its cursor works.
+- **`quickValidate` does not always record the validation.** The server skips
+  the `last_validated_at` write whenever the request carries an `Origin`
+  header, and the response is byte-identical either way, so there is nothing
+  to branch on. In a browser this is unavoidable: the browser adds `Origin`
+  to a cross-origin `fetch` itself and script cannot suppress it, so
+  quick-validate from a browser **never** records a validation. That leaves a
+  license with no machines reading as `INACTIVE` and keeps the
+  check-in-overdue worker firing. Use `validateById` when the write matters —
+  the `POST` route has no `Origin` branch.
 - **No RFC 9421 response-signature verification.** No API response is signed, so
   there is nothing to verify.
 - **No `Tamga-Environment` request header.** No server code path reads it yet.
+- **`scope.version` and `scope.checksum` are dead.** The server answers
+  `422 SCOPE_NOT_SUPPORTED` to a scope carrying either and never runs the
+  validation, so `validateById` strips both before sending rather than letting
+  them fail the whole call. They are deprecated and will be removed in the
+  next minor release. The other six scope fields — including `entitlements`
+  (matched on entitlement **codes**, case-insensitively, across direct and
+  inherited rows) and `fingerprint` (matched against any machine on the
+  license) — are genuinely enforced.
+- **Machine `memory` and `disk` are megabytes, not bytes.** They feed the
+  license's memory/disk tallies and the activation limit check, so reporting
+  16 GB as `17179869184` instead of `16384` inflates the account tally by
+  roughly a million and gets the next activation on that license refused with
+  `MEMORY_LIMIT_EXCEEDED`.
 - **Ten of the 24 `ValidationCode` values are not reachable today.** They are
   modelled for forward-compatibility (`src/models/validation.ts`); do not write
-  logic that depends on receiving one.
+  logic that depends on receiving one. (`ENTITLEMENTS_MISSING` and
+  `FINGERPRINT_SCOPE_MISMATCH` have since become reachable — the scope fields
+  behind them are enforced now.)
 
 ## Documentation
 

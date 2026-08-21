@@ -18,12 +18,19 @@ const client = new TamgaClient({
 const licenseId = process.env.TAMGA_LICENSE_ID ?? "00000000-0000-0000-0000-000000000000";
 const fingerprint = process.env.TAMGA_MACHINE_FINGERPRINT ?? "fp-abc123";
 
-// No machine/core/etc. limit is checked at creation time — use
-// activateMachine (create + validate composed, with optional
-// auto-delete-on-overage) if you need "reject over-limit activation" UX.
+// Creation DOES run the machine/core/memory/disk limit checks, routed
+// through the policy's overage_strategy: under NO_OVERAGE an over-limit
+// create throws (422 MACHINE_LIMIT_EXCEEDED and friends), while an
+// overage-permitting strategy lets it through and surfaces the limit at
+// validate instead. activateMachine (create + validate composed, with
+// optional auto-delete-on-overage) normalizes both onto one ValidationCode
+// — prefer it if you need "reject over-limit activation" UX.
 const machine = await client.createMachine(licenseId, fingerprint, {
   hostname: process.env.HOSTNAME,
   platform: process.platform,
+  // memory/disk, if you report them, are MEGABYTES — 16 GB is 16384, not
+  // 17179869184. Reporting bytes inflates the license's tally by ~1e6 and
+  // gets the next activation refused with MEMORY_LIMIT_EXCEEDED.
 });
 
 console.log(`Machine ${machine.id} created, heartbeat_status: ${machine.attributes.heartbeat_status}`);

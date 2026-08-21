@@ -19,6 +19,14 @@
  * - Matcher helpers key on `code` (stable), never on `detail` (human text,
  *   may change) — see the Tamga API protocol specification §11.
  *
+ * ## Auth errors are reachable
+ *
+ * `401 UNAUTHORIZED` / `403 FORBIDDEN` are **not** placeholders on this SDK's
+ * endpoints. License-key auth (`{ kind: "license", key }`) is only accepted
+ * when the license's policy sets `authentication_strategy` to `"LICENSE"` or
+ * `"MIXED"` — and that column defaults to `"TOKEN"`, under which a license key
+ * is rejected with `401 LICENSE_NOT_ALLOWED`. See {@link LicenseNotAllowedError}.
+ *
  * `429 TOO_MANY_REQUESTS` is live and is handled one layer down, in
  * `src/transport.ts` — a retryable request is retried transparently there
  * (parsed and capped `Retry-After`, otherwise jittered exponential backoff) and
@@ -124,10 +132,11 @@ export class NotFoundError extends TamgaApiErrorException {
 }
 
 /**
- * `401 UNAUTHORIZED` — missing or invalid credentials. Not currently
- * reachable on the license/machine endpoints this SDK calls (auth isn't
- * enforced there today — see the Tamga API protocol specification's Known
- * Server-Side Gaps #3), but modeled for forward-compatibility.
+ * `401 UNAUTHORIZED` — missing or invalid credentials. Fully reachable on
+ * the license and machine endpoints this SDK calls: authentication is
+ * enforced server-side. A license key additionally has to be *permitted* by
+ * the license's policy — see {@link LicenseNotAllowedError}, which is the
+ * more specific 401 a misconfigured policy produces.
  */
 export class UnauthorizedError extends TamgaApiErrorException {
   static readonly CODE = "UNAUTHORIZED";
@@ -267,6 +276,137 @@ export class DatasetInvalidError extends TamgaApiErrorException {
 }
 
 /**
+ * `422 MACHINE_LIMIT_EXCEEDED` — `POST /machines` was refused because the
+ * license is already at (or would exceed) its machine limit.
+ *
+ * ⚠️ Creation **does** run the limit check — it is not deferred to validate.
+ * Whether it fires depends on the policy's `overage_strategy`: under
+ * `NO_OVERAGE` the create is refused with this code, while `ALLOW_ACCESS` /
+ * `ALLOW_1_25X_OVERAGE` / … let the create through and surface the overage
+ * later as a `TOO_MANY_MACHINES` validation code. {@link
+ * import("./client.js").TamgaClient.activateMachine} handles both paths.
+ */
+export class MachineLimitExceededError extends TamgaApiErrorException {
+  static readonly CODE = "MACHINE_LIMIT_EXCEEDED";
+  constructor(apiError: TamgaApiError) {
+    super(apiError, `machine limit exceeded: ${apiError.detail}`);
+    this.name = "MachineLimitExceededError";
+  }
+}
+
+/**
+ * `422 CORE_LIMIT_EXCEEDED` — `POST /machines` was refused because the
+ * reported `cores` would push the license over `policy.max_cores`. Same
+ * create-time-vs-validate-time split as {@link MachineLimitExceededError}.
+ */
+export class CoreLimitExceededError extends TamgaApiErrorException {
+  static readonly CODE = "CORE_LIMIT_EXCEEDED";
+  constructor(apiError: TamgaApiError) {
+    super(apiError, `core limit exceeded: ${apiError.detail}`);
+    this.name = "CoreLimitExceededError";
+  }
+}
+
+/**
+ * `422 MEMORY_LIMIT_EXCEEDED` — `POST /machines` was refused because the
+ * reported `memory` would push the license over `policy.max_memory`.
+ *
+ * ⚠️ `memory` is in **megabytes** (see {@link
+ * import("./client.js").CreateMachineOptions}). Reporting bytes inflates the
+ * account's tally by ~1e6 and makes this the error every subsequent
+ * activation on the license hits.
+ */
+export class MemoryLimitExceededError extends TamgaApiErrorException {
+  static readonly CODE = "MEMORY_LIMIT_EXCEEDED";
+  constructor(apiError: TamgaApiError) {
+    super(apiError, `memory limit exceeded: ${apiError.detail}`);
+    this.name = "MemoryLimitExceededError";
+  }
+}
+
+/**
+ * `422 DISK_LIMIT_EXCEEDED` — `POST /machines` was refused because the
+ * reported `disk` would push the license over `policy.max_disk`. `disk` is
+ * in **megabytes**; see {@link MemoryLimitExceededError}.
+ */
+export class DiskLimitExceededError extends TamgaApiErrorException {
+  static readonly CODE = "DISK_LIMIT_EXCEEDED";
+  constructor(apiError: TamgaApiError) {
+    super(apiError, `disk limit exceeded: ${apiError.detail}`);
+    this.name = "DiskLimitExceededError";
+  }
+}
+
+/**
+ * `422 TOO_MANY_PROCESSES` — `POST /processes` was refused because the
+ * license is already at `policy.max_processes`. Spawn-time enforcement;
+ * retrying the same spawn keeps returning this code.
+ *
+ * Shares its wire string with the `TOO_MANY_PROCESSES` {@link
+ * import("./models/validation.js").ValidationCode}, which reports the same
+ * condition on a *successful* 200 validate response — this class is only
+ * ever the `422` form.
+ */
+export class TooManyProcessesError extends TamgaApiErrorException {
+  static readonly CODE = "TOO_MANY_PROCESSES";
+  constructor(apiError: TamgaApiError) {
+    super(apiError, `too many processes: ${apiError.detail}`);
+    this.name = "TooManyProcessesError";
+  }
+}
+
+/**
+ * `401 LICENSE_SUSPENDED` — the license authenticated, but is suspended, so
+ * the credential itself is rejected at the auth gate. Distinct from a
+ * `SUSPENDED` {@link import("./models/validation.js").ValidationCode}, which
+ * comes back on a *successful* 200 validate call.
+ */
+export class LicenseSuspendedError extends TamgaApiErrorException {
+  static readonly CODE = "LICENSE_SUSPENDED";
+  constructor(apiError: TamgaApiError) {
+    super(apiError, `license suspended: ${apiError.detail}`);
+    this.name = "LicenseSuspendedError";
+  }
+}
+
+/**
+ * `401 LICENSE_EXPIRED` — the license authenticated, but has expired and its
+ * policy's `expiration_strategy` is `"REVOKE_ACCESS"`. Under
+ * `"MAINTAIN_ACCESS"` / `"ALLOW_ACCESS"` / `"RESTRICT_ACCESS"` an expired
+ * license still authenticates and the expiry surfaces as an `EXPIRED`
+ * validation code instead — see
+ * {@link import("./models/policy.js").ExpirationStrategy}.
+ */
+export class LicenseExpiredError extends TamgaApiErrorException {
+  static readonly CODE = "LICENSE_EXPIRED";
+  constructor(apiError: TamgaApiError) {
+    super(apiError, `license expired: ${apiError.detail}`);
+    this.name = "LicenseExpiredError";
+  }
+}
+
+/**
+ * `401 LICENSE_NOT_ALLOWED` — license-key auth is **switched off** for this
+ * license's policy.
+ *
+ * The server only accepts an `Authorization: License <key>` credential when
+ * the policy's `authentication_strategy` is `"LICENSE"` or `"MIXED"`; the
+ * column defaults to `"TOKEN"`, and `"NONE"` rejects it too. See {@link
+ * import("./models/policy.js").AuthenticationStrategy}.
+ *
+ * ⚠️ **Not** a retryable auth failure — it is a configuration precondition.
+ * Retrying, rotating the key, or re-prompting the user cannot fix it; the
+ * policy has to be changed. Do not put this code in a retry loop.
+ */
+export class LicenseNotAllowedError extends TamgaApiErrorException {
+  static readonly CODE = "LICENSE_NOT_ALLOWED";
+  constructor(apiError: TamgaApiError) {
+    super(apiError, `license not allowed: ${apiError.detail}`);
+    this.name = "LicenseNotAllowedError";
+  }
+}
+
+/**
  * Fallback for any server-returned error `code` without a dedicated typed
  * subclass above — still carries the full {@link TamgaApiError}, so callers
  * can match on `.code` manually.
@@ -312,6 +452,22 @@ export function errorFromApiError(apiError: TamgaApiError): TamgaApiErrorExcepti
       return new SchemeNotSupportedError(apiError);
     case DatasetInvalidError.CODE:
       return new DatasetInvalidError(apiError);
+    case MachineLimitExceededError.CODE:
+      return new MachineLimitExceededError(apiError);
+    case CoreLimitExceededError.CODE:
+      return new CoreLimitExceededError(apiError);
+    case MemoryLimitExceededError.CODE:
+      return new MemoryLimitExceededError(apiError);
+    case DiskLimitExceededError.CODE:
+      return new DiskLimitExceededError(apiError);
+    case TooManyProcessesError.CODE:
+      return new TooManyProcessesError(apiError);
+    case LicenseSuspendedError.CODE:
+      return new LicenseSuspendedError(apiError);
+    case LicenseExpiredError.CODE:
+      return new LicenseExpiredError(apiError);
+    case LicenseNotAllowedError.CODE:
+      return new LicenseNotAllowedError(apiError);
     default:
       return new ApiError(apiError);
   }

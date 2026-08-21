@@ -21,9 +21,13 @@ export interface MachineAttributes {
   fingerprint: string;
   /** CPU core count, if reported at registration. */
   cores: number | null;
-  /** Memory in bytes, if reported. */
+  /**
+   * Memory in **megabytes**, if reported — not bytes. See {@link
+   * import("../client.js").CreateMachineOptions.memory} for why the unit
+   * matters.
+   */
   memory: number | null;
-  /** Disk in bytes, if reported. */
+  /** Disk in **megabytes**, if reported — not bytes. Same caveat as {@link memory}. */
   disk: number | null;
   /** IP address, if reported. */
   ip: string | null;
