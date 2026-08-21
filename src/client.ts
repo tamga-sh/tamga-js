@@ -562,15 +562,21 @@ export class TamgaClient {
    * ⚠️ **You have to size `intervalMs` yourself, and 600s is only a
    * fallback.** The server's window is `policy.heartbeat_duration` seconds
    * when that column is set, and 600s (10 min) only when it is null. This
-   * client has no policy or machine getter, so it cannot read the effective
-   * window and this scheduler never adapts to it: `MACHINE_HEARTBEAT_WINDOW_MS`
-   * is the 600s fallback, safe to divide only while `heartbeat_duration` is
+   * scheduler does not adapt on its own — `MACHINE_HEARTBEAT_WINDOW_MS` is
+   * the 600s fallback, safe to divide only while `heartbeat_duration` is
    * unset. Under a policy with a shorter duration an interval picked against
-   * 600s is too slow: the machine falls outside its window between pings —
-   * which is exactly what makes it cullable under a `require_heartbeat`
-   * policy — even though no response here will say so. Obtain your real
-   * window out of band (from whoever configures the policy) and pass a
-   * correspondingly shorter `intervalMs`.
+   * 600s is too slow: the machine falls outside its window between pings,
+   * which is what makes it cullable under a `require_heartbeat` policy.
+   *
+   * You are not without a source for the real value, though. A read-backed
+   * machine — one from `verifyAndDecryptMachineFile` or the `machine` half of
+   * {@link generateOfflineProof} — carries the effective window as
+   * `next_heartbeat_at - last_heartbeat_at`; see
+   * {@link import("./models/machine.js").MachineAttributes.next_heartbeat_at}
+   * for the recipe and its caveats (read-backed only, needs one prior ping,
+   * snapshot from issue time). Size `intervalMs` off that — a third of it is
+   * a good default — and fall back to learning the window out of band, from
+   * whoever configures the policy, only when no machine file is available.
    *
    * ⚠️ **This timer must never stop on a `heartbeat_status` value**, and it
    * does not — the interval callback discards the response entirely. Two

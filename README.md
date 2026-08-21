@@ -363,22 +363,34 @@ Things this SDK deliberately does not do, or cannot do yet.
   swallows every ping failure, that 404 included, so a client that must react
   to deletion should drive `pingHeartbeat` on its own timer and catch
   `NotFoundError`.
-- **The heartbeat window is policy-driven, and this SDK cannot read it.** The
-  server uses `policy.heartbeat_duration` seconds when that column is set, and
-  falls back to 600s (10 min) only when it is null
+- **The heartbeat window is policy-driven, and `startHeartbeat` does not adapt
+  to it — but you can read it off a machine file.** The server uses
+  `policy.heartbeat_duration` seconds when that column is set, and falls back to
+  600s (10 min) only when it is null
   (`Policy::effective_heartbeat_duration_secs`; the cull job's claim query uses
-  `COALESCE(p.heartbeat_duration, 600)`). There is no `getPolicy` / `getMachine`
-  method here, so nothing in this SDK discovers that value:
-  `MACHINE_HEARTBEAT_WINDOW_MS` is the **600s fallback**, not a reading of your
-  policy, and `startHeartbeat` never adapts to a shorter one. Dividing the
-  constant is therefore only safe while `heartbeat_duration` is unset — under a
-  policy that sets it lower, an interval sized against 600s is too slow: the
-  machine falls outside its window between pings — which is what makes it
-  cullable under `require_heartbeat` — and no response will say so. Learn your
-  real window out of band
-  (from whoever configures the policy) and pass a correspondingly shorter
-  `intervalMs`. The 30s **process** window is genuinely hardcoded server-side
-  and needs no such care.
+  `COALESCE(p.heartbeat_duration, 600)`). `MACHINE_HEARTBEAT_WINDOW_MS` is that
+  **600s fallback**, not a reading of your policy, so dividing it is only safe
+  while `heartbeat_duration` is unset — under a policy that sets it lower, an
+  interval sized against 600s leaves the machine outside its window between
+  pings, which is what makes it cullable under `require_heartbeat`.
+
+  To get the real value, subtract on a **read-backed** machine —
+  `verifyAndDecryptMachineFile`'s return value, or `generateOfflineProof`'s
+  `machine`, whose queries join the policy:
+
+  ```ts
+  const { last_heartbeat_at: last, next_heartbeat_at: next } = machine.attributes;
+  const windowMs = last && next ? Date.parse(next) - Date.parse(last) : undefined;
+  ```
+
+  Three caveats: a `pingHeartbeat` response does **not** work for this (that
+  query carries no policy join, so `next_heartbeat_at` comes back as
+  `last_heartbeat_at + 600s` whatever the policy says); both fields are `null`
+  until the machine has been pinged once; and the value is a snapshot from the
+  file's issue time. Learn the window out of band, from whoever configures the
+  policy, only when no machine file is available. There is still no `getPolicy`
+  / `getMachine` method here. The 30s **process** window is genuinely hardcoded
+  server-side and needs no such care.
 - **Eight of the 24 `ValidationCode` values are not reachable today.** They are
   modelled for forward-compatibility (`src/models/validation.ts`); do not write
   logic that depends on receiving one. `ENTITLEMENTS_MISSING` and

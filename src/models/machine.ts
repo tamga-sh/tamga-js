@@ -41,7 +41,34 @@ export interface MachineAttributes {
   heartbeat_status: HeartbeatStatus;
   /** Timestamp of the last `ping-heartbeat` call. */
   last_heartbeat_at: string | null;
-  /** Server-computed next-expected-heartbeat deadline, if derivable. */
+  /**
+   * Server-computed next-expected-heartbeat deadline, if derivable:
+   * `last_heartbeat_at` plus the window this row was judged on.
+   *
+   * **This is how you recover the effective heartbeat window.** Subtracting
+   * `last_heartbeat_at` from it yields `policy.heartbeat_duration` in
+   * milliseconds — the value {@link MACHINE_HEARTBEAT_WINDOW_MS} only
+   * guesses at:
+   *
+   * ```ts
+   * const { last_heartbeat_at: last, next_heartbeat_at: next } = machine.attributes;
+   * const windowMs = last && next ? Date.parse(next) - Date.parse(last) : undefined;
+   * ```
+   *
+   * ⚠️ Only trustworthy on a **read-backed** machine — one from
+   * {@link import("../checkout/machineFile.js").verifyAndDecryptMachineFile}
+   * or the `machine` half of
+   * {@link import("../client.js").TamgaClient.generateOfflineProof}, whose
+   * queries join the policy. A `pingHeartbeat` response is **not**: that
+   * query carries no policy join, so the server falls back to 600s and this
+   * field comes back as `last_heartbeat_at + 600s` no matter what the policy
+   * says. Deriving a window from a ping just reproduces the fallback.
+   *
+   * `null` until the machine has been pinged at least once (it is derived
+   * from `last_heartbeat_at`), and the value is a snapshot from the moment
+   * the file or proof was issued — re-derive it if the policy may have
+   * changed since.
+   */
   next_heartbeat_at: string | null;
   /** Timestamp of the last machine-file checkout. */
   last_check_out_at: string | null;
@@ -58,15 +85,16 @@ export interface MachineAttributes {
  * (pinged within window) → `DEAD` (window elapsed) → `RESURRECTED` (new
  * ping arrived after a death event was already recorded).
  *
- * ⚠️ The window is **policy-driven, and this SDK cannot read it**. The server
- * uses `policy.heartbeat_duration` seconds when that column is set and falls
- * back to 600s (10 min) only when it is null
+ * ⚠️ The window is **policy-driven**. The server uses
+ * `policy.heartbeat_duration` seconds when that column is set and falls back
+ * to 600s (10 min) only when it is null
  * (`Policy::effective_heartbeat_duration_secs`; the cull job's claim query
- * uses `COALESCE(p.heartbeat_duration, 600)`). This SDK exposes no policy or
- * machine read, so nothing here discovers the effective value —
- * {@link MACHINE_HEARTBEAT_WINDOW_MS} is that 600s fallback, not a reading of
- * your policy. On a policy with a shorter `heartbeat_duration` you must learn
- * the real window out of band and size your own ping interval against it.
+ * uses `COALESCE(p.heartbeat_duration, 600)`). {@link MACHINE_HEARTBEAT_WINDOW_MS}
+ * is that fallback, not a reading of your policy — but you are not without a
+ * source: a read-backed machine carries the effective window in
+ * {@link MachineAttributes.next_heartbeat_at} (subtract `last_heartbeat_at`
+ * from it), see that field's doc for the exact recipe and its caveats. Learn
+ * the window out of band only when no machine file is available.
  *
  * ⚠️ **Which responses can carry `DEAD` depends on how the row was
  * produced.** A response built off a row the request just wrote never can:
@@ -115,11 +143,13 @@ export type HeartbeatStatus = "NOT_STARTED" | "ALIVE" | "DEAD" | "RESURRECTED" |
  * value it uses when `policy.heartbeat_duration` is null.
  *
  * ⚠️ Not necessarily *your* window. A policy that sets `heartbeat_duration`
- * gets that value instead, and this SDK has no way to read it back (there is
- * no policy or machine getter here), so this constant cannot adapt. Treat it
- * as a default to size {@link import("../client.js").TamgaClient.startHeartbeat}
- * against only while `heartbeat_duration` is unset; otherwise pass an interval
- * derived from your own policy's value. See {@link HeartbeatStatus}.
+ * gets that value instead, and this constant is a compile-time literal that
+ * cannot adapt. Treat it as a default to size
+ * {@link import("../client.js").TamgaClient.startHeartbeat} against only while
+ * `heartbeat_duration` is unset; otherwise pass an interval derived from the
+ * real window, which a checked-out machine file gives you as
+ * `next_heartbeat_at - last_heartbeat_at` (see
+ * {@link MachineAttributes.next_heartbeat_at}). See {@link HeartbeatStatus}.
  */
 export const MACHINE_HEARTBEAT_WINDOW_MS = 600_000;
 

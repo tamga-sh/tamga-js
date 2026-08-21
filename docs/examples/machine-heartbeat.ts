@@ -3,12 +3,16 @@
  * re-activate when the machine row disappears.
  *
  * The heartbeat window is `policy.heartbeat_duration` seconds when that
- * column is set, and 600s (10 min) only when it is null. This SDK cannot
- * read it back — there is no policy getter — so MACHINE_HEARTBEAT_WINDOW_MS
- * is that 600s fallback and `startHeartbeat` never adapts. The 3-minute
- * interval below (a third of the fallback, a safe margin against network
- * jitter) is therefore correct only while `heartbeat_duration` is unset: if
- * your policy sets it, find that value out of band and divide it instead.
+ * column is set, and 600s (10 min) only when it is null.
+ * MACHINE_HEARTBEAT_WINDOW_MS is that fallback and `startHeartbeat` does not
+ * adapt on its own, so the 3-minute interval below (a third of the fallback,
+ * a safe margin against network jitter) is correct only while
+ * `heartbeat_duration` is unset. If your policy sets it, size the interval
+ * off the real window instead: check out a machine file and subtract —
+ * `next_heartbeat_at - last_heartbeat_at` is the effective window (see
+ * `docs/examples/offline-machine-file.ts`, and the caveats on that field:
+ * read-backed responses only, needs one prior ping, snapshot from issue
+ * time). Out-of-band is the fallback when no machine file is available.
  *
  * ⚠️ There is deliberately no `case "DEAD"` below, because a *ping* cannot
  * return that status: it writes `last_heartbeat_at = NOW()` and then derives

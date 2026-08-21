@@ -71,10 +71,15 @@ Finally, the machine heartbeat window was documented throughout as a hardcoded
 600s that `policy.heartbeat_duration` does not drive. It is the opposite: the
 server uses `heartbeat_duration` seconds when that column is set and falls back
 to 600s only when it is null (`Policy::effective_heartbeat_duration_secs`, and
-`COALESCE(p.heartbeat_duration, 600)` in the cull job's claim query). Since this
-SDK has no policy or machine getter, it cannot read the effective window, so
+`COALESCE(p.heartbeat_duration, 600)` in the cull job's claim query).
 `MACHINE_HEARTBEAT_WINDOW_MS` is now documented as the 600s **fallback** and
 `startHeartbeat` as a scheduler you size yourself: dividing the constant is safe
-only while `heartbeat_duration` is unset, and under a policy that sets it lower
-you must learn your window out of band and pass a shorter `intervalMs`. The 30s
-process window really is hardcoded and is unchanged.
+only while `heartbeat_duration` is unset. The real value is recoverable without
+a policy getter — on a read-backed machine (`verifyAndDecryptMachineFile`, or
+`generateOfflineProof`'s `machine`, whose queries join the policy)
+`next_heartbeat_at - last_heartbeat_at` **is** the effective window, and
+`MachineAttributes.next_heartbeat_at` now documents that recipe with its three
+caveats: not from a ping response (no policy join there, so it always reads
+`+600s`), `null` until the machine has been pinged once, and a snapshot from
+issue time. Learn the window out of band only when no machine file is
+available. The 30s process window really is hardcoded and is unchanged.

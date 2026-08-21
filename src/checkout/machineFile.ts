@@ -171,6 +171,11 @@ export function parseMachineFile(pem: string): ParsedMachineFile {
  * `"DEAD"`. It is a snapshot from issue time, not a live reading, and
  * `DEAD` still does not mean the row was culled — see that type's doc.
  *
+ * The same read gives you the machine's **effective heartbeat window**:
+ * `next_heartbeat_at - last_heartbeat_at` is `policy.heartbeat_duration` in
+ * milliseconds, which no other response in this SDK reports truthfully. See
+ * {@link import("../models/machine.js").MachineAttributes.next_heartbeat_at}.
+ *
  * `scheme` **must** come from the license's own `scheme` field (via
  * whatever license resource governs this machine) — never from parsing the
  * file's `alg` string, which cannot safely disambiguate `RSA_2048_PKCS1_SIGN`

@@ -265,11 +265,14 @@ export interface PolicyAttributes {
    *
    * ⚠️ Two caveats. It does **not** affect processes — that window really is
    * a hardcoded 30s regardless of this value (see
-   * `src/models/machine.ts`'s `PROCESS_HEARTBEAT_WINDOW_MS`). And this SDK
-   * cannot read it: there is no policy getter here, so
-   * `MACHINE_HEARTBEAT_WINDOW_MS` stays pinned to the 600s fallback and
-   * {@link import("../client.js").TamgaClient.startHeartbeat} never adapts —
-   * size the interval yourself when your policy sets this.
+   * `src/models/machine.ts`'s `PROCESS_HEARTBEAT_WINDOW_MS`). And there is no
+   * policy getter here, so `MACHINE_HEARTBEAT_WINDOW_MS` stays pinned to the
+   * 600s fallback and
+   * {@link import("../client.js").TamgaClient.startHeartbeat} does not adapt
+   * on its own — size the interval yourself when your policy sets this. You
+   * can recover the value without reading the policy: a checked-out machine
+   * file reports it as `next_heartbeat_at - last_heartbeat_at` (see
+   * {@link import("./machine.js").MachineAttributes.next_heartbeat_at}).
    */
   heartbeat_duration: number | null;
   /**
