@@ -16,6 +16,12 @@
  *    the filesystem, which is exactly where the four runtimes diverge —
  *    and the RSA fixtures are the largest files in the set, so a runtime
  *    that reads them short fails here rather than in production.
+ * 3. `computeFingerprint` agrees with the shared cross-SDK vectors on each
+ *    runtime. It is pure JavaScript over `TextEncoder` and `@noble/hashes`,
+ *    which is precisely the kind of code that looks runtime-independent and
+ *    is not: a runtime whose `TextEncoder` differed would produce a different
+ *    fingerprint for the same machine, i.e. a second seat, and nothing else
+ *    in this suite would notice.
  */
 
 import { readFileSync } from "node:fs";
@@ -29,6 +35,9 @@ import {
   verifyAndDecryptMachineFile,
   verifyMachineFileWithClaims,
   verifyMachineFileWithKeySet,
+  computeFingerprint,
+  canonicalFingerprintString,
+  FingerprintError,
   MACHINE_HEARTBEAT_WINDOW_MS,
 } from "../dist/index.js";
 
@@ -227,6 +236,41 @@ if (windowMs !== 60_000) {
   throw new Error(`smoke test failed: heartbeatWindowMsFromMachine returned ${windowMs}, expected 60000`);
 }
 
+// Fingerprint canonicalisation, checked against the same shared vectors the
+// vitest suite uses — read from the fixture rather than restated, so the two
+// cannot drift apart. Order-independence and the ASCII-whitespace trim are the
+// two that a `TextEncoder` or string difference would break first.
+const fingerprintVectors = JSON.parse(
+  readFileSync(new URL("../test/fixtures/fingerprint/fingerprint.json", import.meta.url), "utf-8"),
+);
+for (const vector of fingerprintVectors.vectors) {
+  const components = vector.components.map(([label, value]) => ({ label, value }));
+  const actual = computeFingerprint(components);
+  if (actual !== vector.fingerprint) {
+    throw new Error(
+      `smoke test failed: fingerprint vector ${vector.name} produced ${actual}, expected ${vector.fingerprint}`,
+    );
+  }
+}
+if (
+  !canonicalFingerprintString([{ label: "machine-id", value: "abc123" }]).startsWith(
+    "tamga-fingerprint-v1",
+  )
+) {
+  throw new Error("smoke test failed: canonical string lost its domain separator");
+}
+// ...and a rejection must still be a rejection once bundled: a build that
+// tree-shook the validation away would pass every positive vector above.
+let rejected = false;
+try {
+  computeFingerprint([]);
+} catch (error) {
+  rejected = error instanceof FingerprintError;
+}
+if (!rejected) {
+  throw new Error("smoke test failed: an empty component list was not rejected");
+}
+
 // `dispose()` on a client with no timers must be a no-op, not a throw — a
 // teardown path calls it unconditionally.
 client.dispose();
@@ -234,5 +278,5 @@ client.dispose();
 // Not linted by `pnpm lint` (scoped to src/test — see eslint.config.js);
 // console output is fine here, this is a script, not library code.
 console.log(
-  `smoke: dist/index.js loaded, TamgaClient constructed, constructor validation ran, heartbeat-window helpers resolved, ${fixtureNames.length} server-produced machine files verified, their kids recomputed, and ${ED25519_FIXTURES.length} verified through a rotated signing-key set OK`,
+  `smoke: dist/index.js loaded, TamgaClient constructed, constructor validation ran, heartbeat-window helpers resolved, ${fixtureNames.length} server-produced machine files verified, their kids recomputed, ${ED25519_FIXTURES.length} verified through a rotated signing-key set, and ${fingerprintVectors.vectors.length} fingerprint vectors matched OK`,
 );
