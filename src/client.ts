@@ -39,7 +39,11 @@ import type { License, LicenseScope } from "./models/license.js";
 import type { Entitlement } from "./models/license.js";
 import type { LicenseValidationResult, ValidationCode, ValidationResult } from "./models/validation.js";
 import type { Machine, Component, Process } from "./models/machine.js";
-import { MACHINE_HEARTBEAT_INTERVAL_DIVISOR, toPidString } from "./models/machine.js";
+import {
+  MACHINE_HEARTBEAT_INTERVAL_DIVISOR,
+  MACHINE_HEARTBEAT_WINDOW_MS,
+  toPidString,
+} from "./models/machine.js";
 import type { Policy } from "./models/policy.js";
 import { effectiveHeartbeatWindowMs } from "./models/policy.js";
 import type { OffsetPage, OffsetPageMeta } from "./models/page.js";
@@ -1288,15 +1292,37 @@ export class TamgaClient {
    * the first where floor and divisor agree, 2 keeps one spare ping, and 1
    * keeps none. Steady state holds the window in all three.
    *
-   * The single window this cannot hold is `heartbeat_duration: 0`, where the
-   * free second *is* the entire grace and the floor lands exactly on it, so a
-   * read landing just before a ping sees `DEAD`. A sub-second ping would hold
-   * it, and this deliberately does not do that: chasing it would tie the SDK's
-   * ping rate to `num_seconds()` truncation — an implementation artifact, not
-   * a protocol guarantee — to serve one nonsensical policy value. A negative
-   * window is unserveable at any rate (`age_secs <= -30` is false for every
-   * age), so there is nothing to chase there either. Both are pinned in
-   * `test/policy-read.spec.ts`.
+   * ⚠️ **A non-positive window is scheduled against the 600 s platform default
+   * instead of being divided.** `heartbeat_duration` of `0` or less is
+   * unsatisfiable: the cull job claims rows with
+   * `last_heartbeat_at < NOW() - make_interval(secs => COALESCE(p.heartbeat_duration, 600))`
+   * (`workers/machine_jobs.rs:214`), and `COALESCE` replaces only `NULL`, so a
+   * stored `0` makes that `last_heartbeat_at < NOW()` — true for every machine
+   * that has ever pinged, at every instant, **at any ping rate**. No interval
+   * saves the row.
+   *
+   * Note this is decided by the *cull* query, not by `heartbeat_status`. The
+   * two disagree here: the status comparison truncates
+   * (`num_seconds() <= window_secs`), so a sub-second ping keeps a `0` window
+   * reporting `ALIVE` while the SQL comparison — exact timestamps, no
+   * truncation — still claims the row. Survival follows the cull job.
+   *
+   * Since no rate helps, the only thing a rate can change is what the futility
+   * costs. Deriving from the raw `0` gave a 1 s interval, i.e. 3600 requests an
+   * hour per machine, forever, buying nothing — the same self-inflicted flood
+   * the floor exists to prevent, reached from the other side. The platform
+   * default gives 200 s (18 an hour), matches the rest of the SDK fleet, and
+   * lands on the correct cadence for free if the policy is later fixed to
+   * `NULL` or 600.
+   *
+   * This substitutes a *rate*, not a *window*.
+   * {@link resolveHeartbeatWindowMs} and
+   * {@link import("./models/policy.js").effectiveHeartbeatWindowMs} still
+   * report `0` verbatim — the SDK does not claim a zero window means 600 s,
+   * only that it cannot schedule against one. Hand-composing the primitives
+   * still yields the 1 s floor instead, because {@link startHeartbeat} gets a
+   * bare number with no provenance and cannot tell a misconfigured window from
+   * a caller who meant `0`. Both are pinned in `test/policy-read.spec.ts`.
    */
   async startHeartbeatFromPolicy(
     machineId: string,
@@ -1308,7 +1334,14 @@ export class TamgaClient {
       opts.divisor !== undefined && opts.divisor > 0
         ? opts.divisor
         : MACHINE_HEARTBEAT_INTERVAL_DIVISOR;
-    return this.startHeartbeat(machineId, windowMs / divisor);
+    // A non-positive window is unsatisfiable at any ping rate (see the doc
+    // comment), so schedule against the platform default instead of dividing a
+    // number no interval can honour. This is a choice of *rate*, not a claim
+    // that the window is 600s — `resolveHeartbeatWindowMs` still reports it
+    // verbatim.
+    const schedulableWindowMs =
+      Number.isFinite(windowMs) && windowMs > 0 ? windowMs : MACHINE_HEARTBEAT_WINDOW_MS;
+    return this.startHeartbeat(machineId, schedulableWindowMs / divisor);
   }
 
   /**

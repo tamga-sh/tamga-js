@@ -541,12 +541,24 @@ Things this SDK deliberately does not do, or cannot do yet.
   windows. What the floor *does* cost is the `MACHINE_HEARTBEAT_INTERVAL_DIVISOR`
   promise of two tolerable consecutive losses: `heartbeat_duration` of 3 is the
   first window where floor and divisor agree, 2 keeps one spare ping, 1 keeps
-  none. The only window the floor cannot hold is `0` — its whole grace is that
-  free second, and the floor lands exactly on it. The SDK does not chase that
-  with a sub-second ping, because doing so would tie the ping rate to a
-  truncation artifact rather than a protocol guarantee. A negative window is
-  unserveable at any rate. The interaction table is pinned in
-  `test/policy-read.spec.ts`. The 30s **process** window is genuinely hardcoded
+  none.
+
+  ⚠️ **A non-positive `heartbeat_duration` is scheduled at the 600s default
+  rate — 200s — rather than divided.** `0` and negatives are storable and are
+  unsatisfiable at *any* ping rate: the cull job claims rows with
+  `last_heartbeat_at < NOW() - make_interval(secs => COALESCE(p.heartbeat_duration, 600))`,
+  and `COALESCE` replaces only `NULL`, so a stored `0` reduces that to
+  `last_heartbeat_at < NOW()` — true for every machine that has ever pinged, at
+  every instant. Note the cull job and `heartbeat_status` disagree here: the
+  status comparison truncates, so a sub-second ping keeps a `0` window
+  *reporting* `ALIVE` while the SQL comparison still claims the row. Survival
+  follows the cull job. Since no rate helps, the only thing left to choose is
+  what the futility costs — 18 requests an hour instead of the 3600 that
+  dividing the raw `0` produced. This substitutes a **rate, not a window**:
+  `resolveHeartbeatWindowMs` still reports `0` verbatim. Hand-composing the
+  primitives yields the 1s floor instead, because `startHeartbeat` receives a
+  bare number and cannot know where it came from. The interaction table is
+  pinned in `test/policy-read.spec.ts`. The 30s **process** window is genuinely hardcoded
   server-side and needs no such care.
 - **Eight of the 24 `ValidationCode` values are not reachable today.** They are
   modelled for forward-compatibility (`src/models/validation.ts`); do not write

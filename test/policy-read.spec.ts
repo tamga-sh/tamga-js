@@ -222,25 +222,38 @@ describe("TamgaClient.startHeartbeatFromPolicy", () => {
   // `heartbeat_duration` is an unconstrained integer column — no `CHECK` — and
   // `effective_heartbeat_duration_secs` returns whatever it holds; only `NULL`
   // takes the 600s fallback. So `0` and a negative are values the server will
-  // really serve, and both divide down to something `setInterval` turns into a
-  // 1ms tick. The floor is what keeps them to one ping a second.
+  // really serve. Neither is satisfiable at any ping rate, so this schedules
+  // against the platform default rather than dividing a number no interval can
+  // honour — 200s, not the 1s the floor would have produced from the raw value.
   it.each([
     ["a zero", 0],
     ["a negative", -30],
-  ])("floors %s heartbeat_duration, which the column permits", async (_label, duration) => {
-    vi.useFakeTimers();
-    const fetchMock = mockSequence(
-      jsonApi({ data: policy({ heartbeat_duration: duration }) }),
-      jsonApi({ data: { id: "m-1", type: "machines", attributes: {} } }),
-      jsonApi({ data: { id: "m-1", type: "machines", attributes: {} } }),
-    );
-    const stop = await client().startHeartbeatFromPolicy("m-1", "lic-1");
+  ])(
+    "schedules %s heartbeat_duration at the 600s default rate, not off the raw value",
+    async (_label, duration) => {
+      vi.useFakeTimers();
+      const fetchMock = mockSequence(
+        jsonApi({ data: policy({ heartbeat_duration: duration }) }),
+        jsonApi({ data: { id: "m-1", type: "machines", attributes: {} } }),
+        jsonApi({ data: { id: "m-1", type: "machines", attributes: {} } }),
+      );
+      const stop = await client().startHeartbeatFromPolicy("m-1", "lic-1");
 
-    await vi.advanceTimersByTimeAsync(999);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(1001);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    stop();
+      // Deriving from the raw value would have fired ~200 times by now.
+      await vi.advanceTimersByTimeAsync(199_999);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      stop();
+    },
+  );
+
+  it("still reports the window verbatim — the substitution is a rate, not a window", async () => {
+    // The accessor's contract is unchanged by the scheduling decision. If this
+    // ever starts returning 600_000 for a stored `0`, the SDK has begun hiding
+    // a misconfigured policy rather than merely declining to chase it.
+    mockJsonApiResponse(policy({ heartbeat_duration: 0 }));
+    expect(await client().resolveHeartbeatWindowMs("lic-1")).toBe(0);
   });
 });
 
@@ -329,27 +342,44 @@ describe("the interval floor against the server's actual liveness rule", () => {
     },
   );
 
-  it("names heartbeat_duration 0 as the one window the floor cannot hold", () => {
-    // Not the 1s window — the 0s one. `0` is storable (the column has no
-    // `CHECK`), and truncation gives it exactly 1000ms of grace, which is
-    // precisely the floor. So the steady-state age reaches the DEAD threshold
-    // at the instant each ping is due, and any latency reads DEAD.
+  /**
+   * ⚠️ **The `0` row is about cost, not correctness.** Every other row above
+   * answers "does this interval hold the window?". This one cannot: a `0`
+   * window is unsatisfiable at any ping rate, so both the old 1s interval and
+   * the current 200s one fail identically. What separates them is only what
+   * the failing costs — 3600 requests an hour against 18. A reader who sees
+   * just the number will otherwise think one of the two is broken.
+   *
+   * Note also that *survival* here is decided by the cull job, not by the
+   * status field these helpers model, and the two disagree at `0`.
+   */
+  it("scores heartbeat_duration 0 as unsatisfiable at any rate — a cost choice, not a fix", () => {
+    // The status comparison truncates, so it alone would say a sub-second ping
+    // holds a `0` window: 333ms keeps the age at 0 whole seconds and
+    // `0 <= 0` passes.
     expect(deadAtAgeMs(0)).toBe(1000);
     expect(lossesTolerated(0, 1000)).toBe(-1);
-
-    // A sub-second ping would in fact hold it — 333ms keeps the age at 0 whole
-    // seconds. The SDK deliberately does not chase that: it would buy one
-    // absurd policy value by pinning the ping rate to `num_seconds()`
-    // truncation, an implementation artifact rather than a contract. If the
-    // server ever compared sub-second, a 0s window would be unserveable at any
-    // rate and this expectation is where that shows up.
     expect(lossesTolerated(0, 333)).toBeGreaterThanOrEqual(0);
+
+    // But the cull job does not truncate. It claims rows with
+    //   last_heartbeat_at < NOW() - make_interval(secs => COALESCE(hd, 600))
+    // (`tamga-api/src/workers/machine_jobs.rs:214`), and `COALESCE` replaces
+    // only NULL — so a stored `0` reduces it to `last_heartbeat_at < NOW()`,
+    // true for every machine that has ever pinged, at every instant, whatever
+    // the interval. Survival follows the cull job, so no rate rescues the row
+    // and the status field's opinion is cosmetic.
+    const cullThresholdMs = (windowSecs: number): number => windowSecs * 1000;
+    expect(cullThresholdMs(0)).toBe(0); // any positive age is already past it
+    for (const intervalMs of [333, 1000, 200_000]) {
+      expect(intervalMs).toBeGreaterThan(cullThresholdMs(0));
+    }
   });
 
-  it("holds the floor for a negative window, which no interval can serve", () => {
-    // `age_secs <= -30` is false for every non-negative age, so a negative
-    // window reads DEAD unconditionally. There is nothing to chase.
+  it("scores a negative window the same way, by both measures", () => {
+    // `age_secs <= -30` is false for every non-negative age, and the cull
+    // threshold is negative, so the row is past it immediately.
     expect(deadAtAgeMs(-30)).toBeLessThan(0);
+    expect(-30 * 1000).toBeLessThan(0);
   });
 });
 

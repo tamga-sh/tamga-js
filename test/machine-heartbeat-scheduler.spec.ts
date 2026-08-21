@@ -310,6 +310,13 @@ describe("TamgaClient.startHeartbeat cannot be turned into a busy loop", () => {
     // Still verbatim — the accessor's contract is unchanged by this fix.
     expect(windowMs).toBe(0);
 
+    // ⚠️ Contrast with `startHeartbeatFromPolicy`, which substitutes the 600s
+    // platform default for a non-positive window and lands on 200s. It can:
+    // it knows the number came from a policy. `startHeartbeat` gets a bare
+    // number with no provenance and cannot tell a misconfigured window from a
+    // caller who meant `0`, so it applies the conservative 1s floor instead.
+    // Both are safe; they differ because they know different things.
+
     const stop = c.startHeartbeat("m-1", windowMs / MACHINE_HEARTBEAT_INTERVAL_DIVISOR);
     await vi.advanceTimersByTimeAsync(3000);
 

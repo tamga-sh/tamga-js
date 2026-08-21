@@ -59,10 +59,24 @@ once its age reaches `window_secs + 1` seconds. Every window carries one free
 second, and a 1 s window has 2 s of slack at a 1 s ping. What the floor does
 cost is `MACHINE_HEARTBEAT_INTERVAL_DIVISOR`'s "two consecutive losses"
 promise: `heartbeat_duration` 3 is the first window where floor and divisor
-agree, 2 keeps one spare ping, 1 keeps none. The only window the floor cannot
-hold is `0`, whose entire grace is that free second; chasing it with a
-sub-second ping would tie the SDK's rate to a truncation artifact rather than a
-protocol guarantee, so it does not. A table naming every window value pins the
+agree, 2 keeps one spare ping, 1 keeps none. A non-positive window is handled separately, and not by the floor at all:
+`startHeartbeatFromPolicy` now substitutes the 600 s platform default before
+dividing, landing on a 200 s interval rather than the 1 s the floor produced
+from a raw `0`. Such a window is unsatisfiable at any ping rate — the cull job
+claims rows with
+`last_heartbeat_at < NOW() - make_interval(secs => COALESCE(p.heartbeat_duration, 600))`,
+and `COALESCE` replaces only `NULL`, so a stored `0` reduces that to
+`last_heartbeat_at < NOW()`, true for every machine that has ever pinged at
+every instant. (The cull job and `heartbeat_status` disagree here: the status
+comparison truncates, so a sub-second ping keeps a `0` window *reporting*
+`ALIVE` while the SQL comparison still claims the row. Survival follows the cull
+job.) Since no rate saves the row, the only thing a rate can change is what the
+futility costs: 18 requests an hour instead of 3600, forever, from every machine
+under that policy. It also lands on the right cadence for free if the policy is
+later corrected. This substitutes a *rate*, not a *window* —
+`effectiveHeartbeatWindowMs` and `resolveHeartbeatWindowMs` still report `0`
+verbatim, and hand-composing the primitives still yields the 1 s floor, because
+`startHeartbeat` gets a bare number with no provenance. A table naming every window value pins the
 interaction, which previously had to be re-derived from two constants in
 different files.
 
