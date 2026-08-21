@@ -35,19 +35,27 @@ the release/auto-update endpoint works and the earlier "it crashes" note was
 wrong.
 
 Also corrected: a machine's `heartbeat_status` of `"DEAD"` was documented
-throughout as "the row was culled — re-activate instead of pinging". That is
-wrong. `DEAD` means only that the last ping is older than the heartbeat
-window: the server's cull job runs exclusively for policies with
-`require_heartbeat = true`, which defaults to `false`, so under a default
-policy no row is ever culled and a machine reports `DEAD` indefinitely with
-its row and its seat intact. A ping to a `DEAD` machine is a bare
-`last_heartbeat_at = now` write with no resurrection check — it succeeds and
-revives the machine — so a scheduler must keep pinging through `DEAD`, and
-`startHeartbeat` does. The only dependable "the row is gone" signal is a
-`404 NOT_FOUND` (`NotFoundError`) from the ping itself, which is where
-re-activation belongs. Docs, JSDoc and the `docs/examples/machine-heartbeat.ts`
-example are updated accordingly, and the scheduler now has a regression test
-proving it keeps pinging across three consecutive `DEAD` responses.
+throughout as "the row was culled — re-activate instead of pinging". Both
+halves of that are wrong. `DEAD` is not observable from any route this SDK
+calls — `pingHeartbeat` writes `last_heartbeat_at = NOW()` and then derives the
+status from that same timestamp, so it answers `ALIVE` or `RESURRECTED`;
+`resetHeartbeat` nulls the column (`NOT_STARTED`); `createMachine` never sets it
+(`NOT_STARTED`); and validate never emits `HEARTBEAT_DEAD`. It is a real server
+state, but only a machine read (`GET /machines/{id}`) surfaces it and this SDK
+exposes none, so the literal stays in `HeartbeatStatus` as forward-compat and a
+`case "DEAD"` in your code is dead code today. Nor would `DEAD` mean the row was
+culled: the cull job runs exclusively for policies with
+`require_heartbeat = true`, which defaults to `false`, so under a default policy
+no row is ever culled and a machine stays `DEAD` indefinitely with its row and
+its seat intact — and a ping revives it regardless (bare
+`last_heartbeat_at = now`, no resurrection check). What remains is the positive
+rule: a heartbeat scheduler must not stop on **any** status, and `startHeartbeat`
+does not — it discards the response entirely. The only terminal signal is a
+`404 NOT_FOUND` (`NotFoundError`) from the ping, meaning the row is gone, which
+is where re-activation belongs. Docs, JSDoc and
+`docs/examples/machine-heartbeat.ts` (whose dead `DEAD` branch is gone) are
+updated accordingly, and the scheduler has a regression test proving the timer
+survives three consecutive unexpected statuses.
 
 `ValidationCode`'s own doc is brought in line with the enforced scope fields:
 `ENTITLEMENTS_MISSING` and `FINGERPRINT_SCOPE_MISMATCH` move out of the

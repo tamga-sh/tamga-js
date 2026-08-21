@@ -92,9 +92,8 @@ Five of these need a caveat before you wire them in:
   for a license-key credential. See **Auth transports**.
 - `listEntitlements` ignores `after`: that route is not paginable server-side.
 - `createMachine`'s `memory` / `disk` are **megabytes**.
-- `startHeartbeat` deliberately keeps pinging through a `"DEAD"`
-  `heartbeat_status` — `DEAD` does not mean the machine was removed. See
-  **Known gaps**.
+- `startHeartbeat` never stops on a `heartbeat_status` value — and a ping
+  cannot report `"DEAD"` in the first place. See **Known gaps**.
 
 Errors are typed subclasses of `TamgaError` (`NotFoundError`,
 `FingerprintTakenError`, `MachineLimitExceededError`,
@@ -338,22 +337,27 @@ Things this SDK deliberately does not do, or cannot do yet.
   16 GB as `17179869184` instead of `16384` inflates the account tally by
   roughly a million and gets the next activation on that license refused with
   `MEMORY_LIMIT_EXCEEDED`.
-- **`heartbeat_status: "DEAD"` does not mean the machine was culled.** It
-  means one thing only: the last ping is older than the heartbeat window.
-  The server's cull job runs exclusively for policies with
-  `require_heartbeat = true`, and that column **defaults to `false`** — so
-  under a default policy no machine row is ever culled, and a machine that
-  stops pinging reports `DEAD` indefinitely with its row and its seat intact.
-  `heartbeat_status` is derived from `last_heartbeat_at` alone and never
-  consults `require_heartbeat`, so the status cannot tell you which case you
-  are in. A ping to a `DEAD` machine is a bare `last_heartbeat_at = now`
-  write with no resurrection check: it succeeds and revives the machine.
-  **Keep the heartbeat running through `DEAD`** — stopping the scheduler or
-  re-activating on it only burns a second seat. The one dependable "the row
-  is gone" signal is a `404 NOT_FOUND` (`NotFoundError`) from the ping
-  itself; hang re-activation off that. `startHeartbeat` swallows every ping
-  failure, that 404 included, so a client that must react to deletion should
-  drive `pingHeartbeat` on its own timer and catch `NotFoundError`.
+- **`heartbeat_status: "DEAD"` is not observable from this SDK, and would
+  not mean the machine was culled if it were.** No route here can return it:
+  `pingHeartbeat` writes `last_heartbeat_at = NOW()` and then derives the
+  status from that same timestamp, so it answers `ALIVE` or `RESURRECTED`;
+  `resetHeartbeat` nulls the column (`NOT_STARTED`); `createMachine` never
+  sets it (`NOT_STARTED`); and validate never emits `HEARTBEAT_DEAD`. `DEAD`
+  is a real server state, reachable only from a machine read
+  (`GET /machines/{id}`) that this SDK does not expose — so a `case "DEAD"`
+  in your code today is dead code, and the literal stays in `HeartbeatStatus`
+  only because it goes live the day a machine-read method lands. Even then it
+  would not mean the row was culled: the cull job runs exclusively for
+  policies with `require_heartbeat = true`, which **defaults to `false`**, so
+  under a default policy no row is ever culled and a machine stays `DEAD`
+  indefinitely with its row and its seat intact — and a ping revives it
+  regardless (bare `last_heartbeat_at = now`, no resurrection check). The
+  practical rule: **a heartbeat scheduler must not stop on any status.** The
+  one terminal signal is a `404 NOT_FOUND` (`NotFoundError`) from the ping,
+  meaning the row is gone; hang re-activation off that. `startHeartbeat`
+  swallows every ping failure, that 404 included, so a client that must react
+  to deletion should drive `pingHeartbeat` on its own timer and catch
+  `NotFoundError`.
 - **The heartbeat window is policy-driven, and this SDK cannot read it.** The
   server uses `policy.heartbeat_duration` seconds when that column is set, and
   falls back to 600s (10 min) only when it is null
@@ -363,8 +367,10 @@ Things this SDK deliberately does not do, or cannot do yet.
   `MACHINE_HEARTBEAT_WINDOW_MS` is the **600s fallback**, not a reading of your
   policy, and `startHeartbeat` never adapts to a shorter one. Dividing the
   constant is therefore only safe while `heartbeat_duration` is unset — under a
-  policy that sets it lower, an interval sized against 600s is too slow and the
-  machine will read `DEAD` between pings. Learn your real window out of band
+  policy that sets it lower, an interval sized against 600s is too slow: the
+  machine falls outside its window between pings — which is what makes it
+  cullable under `require_heartbeat` — and no response will say so. Learn your
+  real window out of band
   (from whoever configures the policy) and pass a correspondingly shorter
   `intervalMs`. The 30s **process** window is genuinely hardcoded server-side
   and needs no such care.

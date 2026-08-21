@@ -68,22 +68,35 @@ export interface MachineAttributes {
  * your policy. On a policy with a shorter `heartbeat_duration` you must learn
  * the real window out of band and size your own ping interval against it.
  *
- * ⚠️ **`DEAD` does not mean the machine was culled.** It means one thing
- * only: the last ping is older than that window. The row is still there, the
- * seat is still taken, and nothing has been deleted or deactivated. The cull
- * job that would remove it runs only for policies with
- * `require_heartbeat = true`, and that column **defaults to `false`** — under
- * a default policy nothing is ever culled, so a machine reports `DEAD`
- * forever while its row and its seat survive. `heartbeat_status` is computed
- * from `last_heartbeat_at` versus the window and never consults
+ * ⚠️ **`DEAD` is not observable through any route this SDK calls today.**
+ * Every method here comes back with something else: `pingHeartbeat` writes
+ * `last_heartbeat_at = NOW()` and then derives the status from that same
+ * timestamp, so it answers `ALIVE` or `RESURRECTED` and never `DEAD`;
+ * `resetHeartbeat` nulls the column (`NOT_STARTED`); `createMachine` never
+ * sets it (`NOT_STARTED`); and license validate never emits
+ * `HEARTBEAT_DEAD`. `DEAD` is a real server state — it is simply reachable
+ * only from a machine **read** (`GET /machines/{id}`, which joins the
+ * policy), and this SDK exposes none. The literal stays in this union
+ * because it is part of the wire model and goes live the day a machine-read
+ * method lands; until then, do not branch on it.
+ *
+ * ⚠️ **And `DEAD` would not mean the machine was culled.** It means one
+ * thing only: the last ping is older than the window. The row is still
+ * there, the seat is still taken, and nothing has been deleted or
+ * deactivated. The cull job that would remove it runs only for policies with
+ * `require_heartbeat = true`, and that column **defaults to `false`** — so
+ * under a default policy nothing is ever culled and a machine stays `DEAD`
+ * indefinitely with its row and its seat intact. `heartbeat_status` is
+ * computed from `last_heartbeat_at` versus the window and never consults
  * `require_heartbeat`, so the status alone cannot tell you which policy you
  * are under.
  *
- * **Keep pinging through `DEAD`.** `ping-heartbeat` on a `DEAD` machine is a
- * bare `last_heartbeat_at = now` write with no resurrection check, so it
- * succeeds and revives the machine. The one signal that the row is really
- * gone is a `404 NOT_FOUND` (`NotFoundError`) from the ping itself — hang
- * re-activation off that, never off `DEAD`.
+ * **A heartbeat scheduler must not stop on any status.** None of the values
+ * a ping can return is a stop condition, and the ping revives the machine
+ * anyway — it is a bare `last_heartbeat_at = now` write with no resurrection
+ * check. The only terminal signal is a `404 NOT_FOUND` (`NotFoundError`)
+ * from the ping itself, meaning the row is gone; hang re-activation off
+ * that.
  *
  * The trailing `string & {}` member is the standard open-union escape
  * hatch — see `src/models/validation.ts`'s module doc for the rationale.

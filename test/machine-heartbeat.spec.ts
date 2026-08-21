@@ -30,13 +30,14 @@ describe("TamgaClient.pingHeartbeat", () => {
   });
 });
 
-describe("pingHeartbeat against a DEAD machine", () => {
-  it("succeeds and revives it — DEAD is not a terminal state", async () => {
+describe("pingHeartbeat on a machine that has lapsed", () => {
+  it("succeeds and comes back RESURRECTED — a ping never reports DEAD", async () => {
     // The ping handler is a bare `last_heartbeat_at = now` write with no
-    // resurrection check, so a DEAD machine answers a ping normally and
-    // comes back RESURRECTED. Nothing about DEAD implies the row was culled:
-    // culling only runs under a `require_heartbeat = true` policy, which is
-    // not the default.
+    // resurrection check, and it derives the returned status from the
+    // timestamp it just wrote — so a lapsed machine answers normally and
+    // comes back RESURRECTED. `DEAD` is not among the statuses this route
+    // can produce; it is visible only from a machine read this SDK does not
+    // expose.
     const fetchMock = mockJsonApiResponse({
       ...machineFixture,
       attributes: { ...machineFixture.attributes, heartbeat_status: "RESURRECTED" },

@@ -1,6 +1,6 @@
 /**
- * Node example: create a machine, start a heartbeat scheduler, and handle
- * DEAD/RESURRECTED transitions.
+ * Node example: create a machine, start a heartbeat scheduler, and
+ * re-activate when the machine row disappears.
  *
  * The heartbeat window is `policy.heartbeat_duration` seconds when that
  * column is set, and 600s (10 min) only when it is null. This SDK cannot
@@ -10,13 +10,16 @@
  * jitter) is therefore correct only while `heartbeat_duration` is unset: if
  * your policy sets it, find that value out of band and divide it instead.
  *
- * ⚠️ DEAD is not a terminal state and does not mean the machine was culled.
- * It means only that the last ping is older than the window. Culling runs
- * exclusively for policies with `require_heartbeat = true`, which is not the
- * default, so a machine can report DEAD forever with its row and its seat
- * intact — and a ping to a DEAD machine succeeds and revives it. The only
- * signal that the row is really gone is a 404 from the ping, which is what
- * this example re-activates on.
+ * ⚠️ There is deliberately no `case "DEAD"` below. A ping cannot return
+ * that status: it writes `last_heartbeat_at = NOW()` and then derives the
+ * status from that same timestamp, so it answers ALIVE or RESURRECTED.
+ * `DEAD` is a real server state, but it is visible only from a machine read
+ * (`GET /machines/{id}`) that this SDK does not expose — a branch on it here
+ * would be dead code. Nor would it be a stop condition if it were reachable:
+ * it does not mean the machine was culled (culling runs only under
+ * `require_heartbeat = true`, which is not the default) and the ping revives
+ * the machine anyway. The one terminal signal is a 404 from the ping,
+ * meaning the row is gone, which is what this example re-activates on.
  */
 import { TamgaClient, NotFoundError, MACHINE_HEARTBEAT_WINDOW_MS } from "@tamga/sdk";
 
@@ -72,16 +75,12 @@ const statusCheck = setInterval(async () => {
     return;
   }
 
-  if (current.attributes.heartbeat_status === "DEAD") {
-    // The window elapsed before a ping arrived. Nothing has been deleted:
-    // the ping that just returned this status already wrote
-    // last_heartbeat_at, so the machine is live again. Do NOT stop the
-    // scheduler and do NOT re-activate here — under the default policy
-    // (require_heartbeat = false) the row is never culled and re-activating
-    // would just burn a second seat.
-    console.log("Machine read DEAD — the ping above revived it; heartbeat continues.");
-  } else if (current.attributes.heartbeat_status === "RESURRECTED") {
-    console.log("Machine came back after a recorded death event.");
+  // RESURRECTED is the only interesting status a ping can hand back: the
+  // machine had fallen outside its window and this ping revived it. Whatever
+  // comes back, neither timer stops — see this file's header for why there is
+  // no DEAD branch.
+  if (current.attributes.heartbeat_status === "RESURRECTED") {
+    console.log("Machine had lapsed and this ping revived it; heartbeat continues.");
   }
 }, MACHINE_HEARTBEAT_WINDOW_MS);
 

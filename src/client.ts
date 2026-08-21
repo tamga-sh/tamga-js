@@ -566,17 +566,21 @@ export class TamgaClient {
    * window and this scheduler never adapts to it: `MACHINE_HEARTBEAT_WINDOW_MS`
    * is the 600s fallback, safe to divide only while `heartbeat_duration` is
    * unset. Under a policy with a shorter duration an interval picked against
-   * 600s is too slow and the machine reads `DEAD` between pings — obtain your
-   * real window out of band (from whoever configures the policy) and pass a
+   * 600s is too slow: the machine falls outside its window between pings —
+   * which is exactly what makes it cullable under a `require_heartbeat`
+   * policy — even though no response here will say so. Obtain your real
+   * window out of band (from whoever configures the policy) and pass a
    * correspondingly shorter `intervalMs`.
    *
-   * ⚠️ **Never stop this timer because `heartbeat_status` reads `"DEAD"`.**
-   * `DEAD` means only that the last ping is older than the window — not that
-   * the row was culled. Culling runs only under `require_heartbeat = true`,
-   * which is **not** the default, so a machine can sit at `DEAD` indefinitely
-   * with its row and its seat intact. A ping to a `DEAD` machine succeeds and
-   * revives it, so this scheduler deliberately keeps pinging straight through
-   * `DEAD` — see {@link import("./models/machine.js").HeartbeatStatus}.
+   * ⚠️ **This timer must never stop on a `heartbeat_status` value**, and it
+   * does not — the interval callback discards the response entirely. Two
+   * independent reasons that is the right design. First, a ping cannot even
+   * report `"DEAD"`: it writes `last_heartbeat_at = NOW()` and then derives
+   * the status from that same timestamp, so it answers `ALIVE` or
+   * `RESURRECTED`; `DEAD` is visible only from a machine read this SDK does
+   * not expose. Second, `DEAD` would not be a stop condition anyway — it
+   * does not mean the row was culled, and the ping revives the machine
+   * regardless. See {@link import("./models/machine.js").HeartbeatStatus}.
    *
    * Ping failures are swallowed (the timer keeps running) so a single
    * transient network blip doesn't kill the scheduler. That includes the

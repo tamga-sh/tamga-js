@@ -5,8 +5,8 @@ import { mockJsonApiResponse } from "./helpers/mockFetch.js";
 /**
  * Serves one `machines` resource per call, walking `statuses` and repeating
  * the last entry once exhausted. Records what it actually served so a test
- * can assert the scheduler really did observe a `DEAD` response — a shared
- * `Response` instance cannot be read twice, so each call gets a fresh one.
+ * can assert which statuses the scheduler was fed — a shared `Response`
+ * instance cannot be read twice, so each call gets a fresh one.
  */
 function mockHeartbeatStatusSequence(statuses: readonly string[]): {
   fetchMock: Mock;
@@ -63,14 +63,16 @@ describe("TamgaClient.startHeartbeat", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
-  it("keeps pinging across three consecutive DEAD responses", async () => {
-    // Regression guard. `DEAD` means only "last ping older than the
-    // heartbeat window" — the row is NOT culled (culling needs a policy with
-    // `require_heartbeat = true`, which is not the default) and the very
-    // ping that reports `DEAD` already revived the machine. A scheduler
-    // that stopped, cleared itself or short-circuited here would abandon a
-    // machine that is still perfectly alive. The fourth response comes back
-    // `ALIVE` precisely because the timer never stopped.
+  it("keeps pinging across three consecutive unexpected DEAD responses", async () => {
+    // Regression guard for the defensive property: no status value stops the
+    // timer. The fixture is deliberately synthetic — a ping cannot actually
+    // return `DEAD` (it writes `last_heartbeat_at = NOW()` and reports
+    // `ALIVE`/`RESURRECTED`), and `DEAD` is only visible from a machine read
+    // this SDK does not expose. `DEAD` is used precisely because it is the
+    // status a scheduler is most tempted to treat as terminal: the callback
+    // discards the response, so not even an unexpected one can abandon a
+    // machine that is still alive. The fourth response comes back `ALIVE`
+    // only because the timer never stopped.
     const { fetchMock, served } = mockHeartbeatStatusSequence(["DEAD", "DEAD", "DEAD", "ALIVE"]);
 
     const stop = client().startHeartbeat("m-1", 1000);

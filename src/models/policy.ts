@@ -95,8 +95,9 @@ export function resolveOverageStrategy(raw: string): OverageStrategy {
  * that column defaults to `false`: the cull job returns early for such a
  * policy and never claims its machines, so under a default policy neither
  * variant here ever runs and no row is ever culled. A machine's
- * `heartbeat_status` reaching `"DEAD"` is therefore not evidence that this
- * strategy was applied — see
+ * `heartbeat_status` sitting at `"DEAD"` is therefore not evidence that this
+ * strategy was applied — not that this SDK can observe that status at all,
+ * since it exposes no machine read; see
  * {@link import("./machine.js").HeartbeatStatus}.
  */
 export type HeartbeatCullStrategy = "DEACTIVATE_DEAD" | "KEEP_DEAD";
@@ -251,8 +252,8 @@ export interface PolicyAttributes {
    * Whether machines under this policy must send heartbeats. **Defaults to
    * `false`**, and the server's cull job returns early for any policy where
    * it is `false` — so on a default policy a machine that stops pinging
-   * reports `heartbeat_status: "DEAD"` indefinitely and is never culled,
-   * deactivated or deleted. See {@link import("./machine.js").HeartbeatStatus}
+   * stays in `heartbeat_status: "DEAD"` indefinitely (a state no route this
+   * SDK calls will report back) and is never culled, deactivated or deleted. See {@link import("./machine.js").HeartbeatStatus}
    * and {@link HeartbeatCullStrategy}.
    */
   require_heartbeat: boolean;
