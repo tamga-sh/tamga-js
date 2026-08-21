@@ -229,3 +229,49 @@ export interface ProcessAttributes {
 export function toPidString(pid: string | number): string {
   return typeof pid === "number" ? String(pid) : pid;
 }
+
+/**
+ * The divisor this SDK's schedulers apply to a heartbeat window to pick a ping
+ * interval: ping three times per window, so two consecutive pings can be lost
+ * without the machine falling outside it.
+ *
+ * Used by
+ * {@link import("../client.js").TamgaClient.startHeartbeatFromPolicy}; exported
+ * so a caller sizing its own timer off
+ * {@link heartbeatWindowMsFromMachine} reaches the same number.
+ */
+export const MACHINE_HEARTBEAT_INTERVAL_DIVISOR = 3;
+
+/**
+ * Recovers the **effective** heartbeat window, in milliseconds, from a machine
+ * that came back on a read path — `next_heartbeat_at - last_heartbeat_at`.
+ *
+ * This is the recipe {@link MachineAttributes.next_heartbeat_at} documents,
+ * written once so callers do not each re-derive it. Returns `undefined` when
+ * either timestamp is absent or unparseable, or when the difference is not
+ * positive.
+ *
+ * ⚠️ **Only meaningful on a read-backed machine.** The server computes
+ * `next_heartbeat_at` from whatever window the answering query had in hand, and
+ * only the read queries join the policy in. Pass one of:
+ *
+ * - {@link import("../client.js").TamgaClient.getMachine}
+ * - a machine from {@link import("../client.js").TamgaClient.listMachines}
+ * - {@link import("../checkout/machineFile.js").verifyAndDecryptMachineFile}
+ * - the `machine` half of
+ *   {@link import("../client.js").TamgaClient.generateOfflineProof}
+ *
+ * Pass a `pingHeartbeat`, `resetHeartbeat` or `createMachine` response and the
+ * answer is always the 600 000 ms fallback, whatever the policy says — those
+ * write paths carry no policy join. There is no field on the response that
+ * distinguishes the two, which is why this takes the machine and not a flag.
+ *
+ * When no machine file or read is available, ask the policy instead:
+ * {@link import("../client.js").TamgaClient.resolveHeartbeatWindowMs}.
+ */
+export function heartbeatWindowMsFromMachine(machine: Machine): number | undefined {
+  const { last_heartbeat_at: last, next_heartbeat_at: next } = machine.attributes;
+  if (last === null || next === null) return undefined;
+  const windowMs = Date.parse(next) - Date.parse(last);
+  return Number.isFinite(windowMs) && windowMs > 0 ? windowMs : undefined;
+}

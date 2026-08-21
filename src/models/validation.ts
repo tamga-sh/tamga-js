@@ -85,4 +85,24 @@ export interface ValidationResult {
   license: import("./license.js").License;
   /** The validation outcome. */
   meta: LicenseValidationResult;
+  /**
+   * The machine this activation resolved to, when the call had one.
+   *
+   * Only {@link import("../client.js").TamgaClient.activateMachine} ever sets
+   * this — `validateByKey`/`validateById` are license-level calls and leave it
+   * absent. Present when `activateMachine` created a machine, and also when it
+   * recovered a pre-existing one through its idempotent
+   * `FINGERPRINT_TAKEN` path.
+   *
+   * Absent in three cases, each meaning something different:
+   * - the create was refused outright by a create-time limit under
+   *   `NO_OVERAGE`, so no machine exists;
+   * - `autoDeleteOnOverage` rolled back the machine this call created, so the
+   *   machine that would have been reported no longer exists;
+   * - the call was not `activateMachine`.
+   *
+   * A machine the caller passed in through the idempotent path is **never**
+   * rolled back, so its presence here does not imply this call created it.
+   */
+  machine?: import("./machine.js").Machine;
 }
