@@ -35,6 +35,11 @@ jobs:
 
       - run: pnpm typecheck
 
+      # A doc that pins a version cannot be trusted to age: four SDKs in this
+      # fleet had one and all four were stale. Nothing here pins on purpose,
+      # so this is guarding the day someone reasonably adds one.
+      - run: pnpm doc-versions:check
+
       # Coverage thresholds (80% lines/functions/branches/statements) are
       # enforced by vitest.config.ts, not re-specified here.
       #
