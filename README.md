@@ -502,7 +502,21 @@ Things this SDK deliberately does not do, or cannot do yet.
   `GET /licenses/{id}/policy` and applies the same fallback the server does, and
   `startHeartbeatFromPolicy(machineId, licenseId)` does that and starts the
   timer at a third of the result. One extra request at startup, and the
-  scheduler stops guessing 600s at a policy that asked for 60. The 30s
+  scheduler stops guessing 600s at a policy that asked for 60.
+
+  Both of those report the window **verbatim**, including a `heartbeat_duration`
+  of `0` or a negative one — the column carries no `CHECK` constraint and
+  `effective_heartbeat_duration_secs` returns whatever it holds; only `NULL`
+  takes the 600s fallback. That is deliberate: rounding a misconfigured policy
+  up to something friendlier in the accessor would hide it. The guard lives in
+  the scheduler instead. `startHeartbeat` confines `intervalMs` to
+  `[1s, 2147483647ms]`, with a non-finite value falling back to the floor, so
+  dividing a zero window by three and passing the result by hand starts a
+  once-a-second timer rather than a busy loop. It has to: `setInterval` does not
+  honour a degenerate delay, it shortens it — `0`, a negative number, `NaN`,
+  `Infinity` and anything past the signed-32-bit ceiling all tick every 1 ms,
+  which is a silent flood of individually valid, correctly authenticated pings
+  rather than a crash. `startProcessHeartbeat` takes the same floor. The 30s
   **process** window is genuinely hardcoded server-side and needs no such care.
 - **Eight of the 24 `ValidationCode` values are not reachable today.** They are
   modelled for forward-compatibility (`src/models/validation.ts`); do not write

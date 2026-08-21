@@ -355,6 +355,47 @@ function csvFilter(value: string | string[] | undefined): string | undefined {
   return values.length === 0 ? undefined : values.join(",");
 }
 
+/**
+ * The shortest interval either heartbeat scheduler will actually run at, in
+ * milliseconds — see {@link clampHeartbeatIntervalMs}.
+ */
+const MIN_HEARTBEAT_INTERVAL_MS = 1000;
+
+/**
+ * The longest one: `setInterval`'s delay is a signed 32-bit value, and an
+ * interval above it is *not* rounded down — Node clamps it to 1 ms (with a
+ * `TimeoutOverflowWarning`) and browsers wrap it, so an over-large interval
+ * busy-loops exactly like a zero one.
+ */
+const MAX_HEARTBEAT_INTERVAL_MS = 2_147_483_647;
+
+/**
+ * Confines a caller-supplied ping interval to a range that cannot turn a
+ * heartbeat timer into a busy loop.
+ *
+ * `setInterval` does not honour a degenerate delay, it *shortens* it: `0`,
+ * a negative number, `NaN`, `Infinity` and anything above
+ * {@link MAX_HEARTBEAT_INTERVAL_MS} all become a 1 ms tick. So an unguarded
+ * `intervalMs` of `0` does not mean "ping as fast as asked" — it means
+ * roughly a thousand `ping-heartbeat` requests a second, from every machine
+ * running that code, indefinitely, each one individually valid and correctly
+ * authenticated. Nothing about it looks like a failure from either end.
+ *
+ * Non-finite values fall back to the floor rather than the ceiling: there is
+ * no "never ping" semantics here, and the floor is the safe reading.
+ *
+ * A sub-second heartbeat is never a real request — the server's window is an
+ * integer-seconds column — so the floor cannot cost a legitimate caller
+ * anything.
+ */
+function clampHeartbeatIntervalMs(intervalMs: number): number {
+  if (!Number.isFinite(intervalMs)) return MIN_HEARTBEAT_INTERVAL_MS;
+  return Math.min(
+    MAX_HEARTBEAT_INTERVAL_MS,
+    Math.max(MIN_HEARTBEAT_INTERVAL_MS, Math.floor(intervalMs)),
+  );
+}
+
 /** The Tamga API client — every endpoint method lives here (plan §2). */
 export class TamgaClient {
   readonly config: TamgaClientConfig;
@@ -1137,11 +1178,35 @@ export class TamgaClient {
    * only real "the row is gone" signal, so this helper cannot surface it:
    * callers that need to re-activate on deletion should drive
    * {@link pingHeartbeat} on their own timer and catch `NotFoundError`.
+   *
+   * ⚠️ **`intervalMs` is confined to `[1s, 2147483647ms]`**, and a non-finite
+   * value falls back to the 1 s floor. That is a guard against a busy loop,
+   * not a rounding convenience: `setInterval` shortens a degenerate delay
+   * rather than honouring it, so `0`, a negative number, `NaN`, `Infinity`
+   * and anything past the 32-bit ceiling all tick every 1 ms — roughly a
+   * thousand `ping-heartbeat` requests a second, from every machine running
+   * that code, each one individually valid and correctly authenticated. The
+   * guard lives in the primitive, rather than in the callers that compute an
+   * interval, so it holds however a caller reaches this timer —
+   * {@link startHeartbeatFromPolicy} inherits it rather than repeating it.
+   *
+   * Reaching it by accident is easy, because the two obvious sources for
+   * `intervalMs` can both hand you a degenerate one. {@link
+   * resolveHeartbeatWindowMs} reports the window the server will judge the
+   * machine on *verbatim*, including the `0` or negative `heartbeat_duration`
+   * the column permits (it carries no `CHECK` constraint), so
+   * `startHeartbeat(id, await this.resolveHeartbeatWindowMs(licenseId) / 3)`
+   * can be handed `0`. {@link
+   * import("./models/machine.js").heartbeatWindowMsFromMachine} returns
+   * `number | undefined`, so the same composition over an
+   * as-yet-unpinged machine can be handed `NaN`. Neither now busy-loops.
+   * A sub-second heartbeat is never a real request — the server's window is
+   * an integer-seconds column — so nothing legitimate is clamped away.
    */
   startHeartbeat(machineId: string, intervalMs: number): () => void {
     const timer = setInterval(() => {
       this.pingHeartbeat(machineId).catch(() => undefined);
-    }, intervalMs);
+    }, clampHeartbeatIntervalMs(intervalMs));
     return this.trackTimer(() => clearInterval(timer));
   }
 
@@ -1174,8 +1239,9 @@ export class TamgaClient {
    *
    * The returned stop function and {@link dispose} both clear the timer.
    * Non-positive `divisor` values fall back to the default, and the resulting
-   * interval is floored at 1 s so a pathologically short policy window cannot
-   * turn into a busy loop.
+   * interval is floored at 1 s by {@link startHeartbeat} so a pathologically
+   * short policy window — `heartbeat_duration` is allowed to be `0` or
+   * negative — cannot turn into a busy loop.
    */
   async startHeartbeatFromPolicy(
     machineId: string,
@@ -1187,7 +1253,7 @@ export class TamgaClient {
       opts.divisor !== undefined && opts.divisor > 0
         ? opts.divisor
         : MACHINE_HEARTBEAT_INTERVAL_DIVISOR;
-    return this.startHeartbeat(machineId, Math.max(1000, Math.floor(windowMs / divisor)));
+    return this.startHeartbeat(machineId, windowMs / divisor);
   }
 
   /**
@@ -1197,6 +1263,14 @@ export class TamgaClient {
    *
    * This is the **window**, not a ping interval; divide it before scheduling.
    * {@link startHeartbeatFromPolicy} does both in one call.
+   *
+   * The number is whatever the server will judge the machine on, *including*
+   * a non-positive one: `heartbeat_duration` carries no `CHECK` constraint,
+   * so a policy may store `0`, and this reports it rather than substituting a
+   * friendlier value that would hide the misconfiguration — see {@link
+   * import("./models/policy.js").effectiveHeartbeatWindowMs}. Feeding it
+   * straight to {@link startHeartbeat} is safe regardless: that method floors
+   * its interval.
    */
   async resolveHeartbeatWindowMs(licenseId: string): Promise<number> {
     return effectiveHeartbeatWindowMs(await this.getLicensePolicy(licenseId));
@@ -1317,11 +1391,17 @@ export class TamgaClient {
    * interval — comfortably inside the hardcoded 30s process heartbeat
    * window. Returns a stop function; ping failures are swallowed (the
    * timer keeps running), same rationale as {@link startHeartbeat}.
+   *
+   * `intervalMs` is confined to the same `[1s, 2147483647ms]` range as
+   * {@link startHeartbeat}, for the same reason: this is the identical
+   * `setInterval` primitive, so an explicit `0` (or a `NaN` out of some
+   * caller-side arithmetic) would spin `ping` at event-loop speed rather
+   * than pinging as fast as asked. The default is untouched by the clamp.
    */
   startProcessHeartbeat(processId: string, intervalMs = 10_000): () => void {
     const timer = setInterval(() => {
       this.pingProcess(processId).catch(() => undefined);
-    }, intervalMs);
+    }, clampHeartbeatIntervalMs(intervalMs));
     return this.trackTimer(() => clearInterval(timer));
   }
 
