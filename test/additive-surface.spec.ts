@@ -18,6 +18,13 @@ import { TamgaClient } from "../src/client.js";
 import type { CreateMachineOptions } from "../src/client.js";
 import type { LicenseScope } from "../src/models/license.js";
 import type { ValidationResult } from "../src/models/validation.js";
+import { verifyAndDecryptLicenseFile, verifyLicenseFileWithClaims } from "../src/checkout/licenseFile.js";
+import type { VerifiedLicenseFile } from "../src/checkout/licenseFile.js";
+import { verifyAndDecryptMachineFile, verifyMachineFileWithClaims } from "../src/checkout/machineFile.js";
+import type { VerifiedMachineFile } from "../src/checkout/machineFile.js";
+import type { License } from "../src/models/license.js";
+import type { Machine } from "../src/models/machine.js";
+import type { LicenseScheme } from "../src/models/policy.js";
 
 /** `activateMachine` exactly as it was declared before this change. */
 type PreviousActivateMachine = (
@@ -102,5 +109,67 @@ describe("the changed declarations remain backward compatible", () => {
     for (const name of previous) {
       expect(typeof client[name]).toBe("function");
     }
+  });
+});
+
+/**
+ * The signing-key-rotation change (`fix/signing-key-rotation`) is additive: it
+ * adds key-set-aware entry points beside the single-key ones rather than
+ * changing them. The four pre-existing verification signatures are re-declared
+ * here exactly as they shipped, so a change to any of them fails `tsc`.
+ *
+ * The generated `dist/index.d.ts` was also diffed against the base branch's:
+ * zero exported names removed, and the only textual difference in the whole
+ * file is the final `export { ... }` manifest gaining the new names. That diff
+ * is the check that catches a *removal*; this file catches a *reshaping*.
+ */
+type PreviousVerifyAndDecryptLicenseFile = (
+  pem: string,
+  ed25519PublicKey: Uint8Array,
+  licenseKey?: string,
+  now?: number,
+) => Promise<License>;
+
+type PreviousVerifyLicenseFileWithClaims = (
+  pem: string,
+  ed25519PublicKey: Uint8Array,
+  licenseKey?: string,
+  now?: number,
+) => Promise<VerifiedLicenseFile>;
+
+type PreviousVerifyAndDecryptMachineFile = (
+  pem: string,
+  scheme: LicenseScheme,
+  publicKey: Uint8Array,
+  keyMaterial?: { licenseKey: string; fingerprint: string },
+  now?: number,
+) => Promise<Machine>;
+
+type PreviousVerifyMachineFileWithClaims = (
+  pem: string,
+  scheme: LicenseScheme,
+  publicKey: Uint8Array,
+  keyMaterial?: { licenseKey: string; fingerprint: string },
+  now?: number,
+) => Promise<VerifiedMachineFile>;
+
+describe("the offline verification surface only grew", () => {
+  it("every single-key entry point still satisfies its previous signature", () => {
+    const a: PreviousVerifyAndDecryptLicenseFile = verifyAndDecryptLicenseFile;
+    const b: PreviousVerifyLicenseFileWithClaims = verifyLicenseFileWithClaims;
+    const c: PreviousVerifyAndDecryptMachineFile = verifyAndDecryptMachineFile;
+    const d: PreviousVerifyMachineFileWithClaims = verifyMachineFileWithClaims;
+
+    for (const fn of [a, b, c, d]) expect(typeof fn).toBe("function");
+  });
+
+  it("the new client methods sit beside the previous ones, not in place of them", () => {
+    const client = new TamgaClient({ accountId: "acct_1", baseUrl: "https://api.tamga.sh" });
+
+    expect(typeof client.listSigningKeys).toBe("function");
+    expect(typeof client.getSigningKeySet).toBe("function");
+    // ...and the checkout methods a caller already had are untouched.
+    expect(typeof client.checkOutLicense).toBe("function");
+    expect(typeof client.checkOutMachine).toBe("function");
   });
 });

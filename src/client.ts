@@ -52,6 +52,8 @@ import type { Release } from "./models/release.js";
 import type { HealthStatus } from "./models/health.js";
 import type { LicenseFileResource } from "./checkout/licenseFile.js";
 import { checkTtl, type MachineFileResource } from "./checkout/machineFile.js";
+import type { SigningKey } from "./models/signingKey.js";
+import { SigningKeySet } from "./checkout/keySet.js";
 
 /** Configuration accepted by {@link TamgaClient}. */
 export interface TamgaClientConfig {
@@ -651,6 +653,71 @@ export class TamgaClient {
       path: `/policies/${policyId}`,
     });
     return data;
+  }
+
+  // ---------------------------------------------------------------------
+  // Signing keys
+  // ---------------------------------------------------------------------
+
+  /**
+   * `GET /signing-keys` — the account's **whole** Ed25519 signing-key history,
+   * retired keys included.
+   *
+   * Retired keys being present is the point of the route, not an oversight: a
+   * `.lic` or `.mach` file signed before the account's last key rotation needs
+   * the key its `kid` claim names, and without it an authentic file fails
+   * verification with the same error a forgery produces. Use
+   * {@link getSigningKeySet} to get the result as a ready-to-verify
+   * {@link SigningKeySet}.
+   *
+   * ⚠️ **The resource `id` *is* the `kid`** — not a UUID like every other
+   * resource this SDK returns. The server sets it from the same value it
+   * stamps into an offline file's claim, so matching a file to its key needs no
+   * local hashing. See {@link import("./models/signingKey.js").SigningKey}.
+   *
+   * ⚠️ **A raw license key cannot call this route.** It is gated on
+   * `account.read`, and the license-key role holds a fixed permission set that
+   * does not include it, so an embedded license-key client gets
+   * {@link import("./errors.js").ForbiddenError} here no matter how the account
+   * is configured — the same shape as {@link getPolicy}, and unlike that one
+   * there is no equivalent route reachable through a permission the role does
+   * hold. Two ways round it: fetch the key set with a back-office token and
+   * ship the public keys with the application
+   * ({@link SigningKeySet.fromPublicKeys} takes them directly), or have the
+   * application's own backend proxy this call.
+   */
+  async listSigningKeys(): Promise<SigningKey[]> {
+    const { data } = await sendJsonApi<SigningKey[]>(this.transport, {
+      method: "GET",
+      path: "/signing-keys",
+    });
+    return data;
+  }
+
+  /**
+   * {@link listSigningKeys}, returned as a ready-to-verify
+   * {@link SigningKeySet} for
+   * {@link import("./checkout/licenseFile.js").verifyLicenseFileWithKeySet} and
+   * {@link import("./checkout/machineFile.js").verifyMachineFileWithKeySet}.
+   *
+   * One call, and the result is worth holding for the life of the process: a
+   * rotation *adds* a key rather than invalidating the ones already there, so a
+   * cached set only ever goes stale for files signed *after* it was fetched —
+   * which is exactly what an `"unknown-key-id"`
+   * {@link import("./errors.js").SigningKeyError} names, and the signal to
+   * fetch again.
+   *
+   * Unusable rows (a future non-Ed25519 algorithm, a key that does not decode)
+   * are skipped rather than failing the whole set — compare
+   * {@link SigningKeySet.size} against `(await listSigningKeys()).length` if you
+   * need to know that something was dropped, and check
+   * {@link SigningKeySet.mismatches} for keys whose served id disagrees with the
+   * `kid` computed from the key itself.
+   *
+   * Carries the same license-key restriction as {@link listSigningKeys}.
+   */
+  async getSigningKeySet(): Promise<SigningKeySet> {
+    return SigningKeySet.fromResources(await this.listSigningKeys());
   }
 
   // ---------------------------------------------------------------------

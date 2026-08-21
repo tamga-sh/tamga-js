@@ -195,6 +195,8 @@ in your application, so they work in air-gapped environments.
 | `verifyLicenseFileWithClaims(pem, ed25519PublicKey, licenseKey?, now?)` | The same, also returning the signed `iat`/`exp`/`jti`/`kid` |
 | `verifyAndDecryptMachineFile(pem, scheme, publicKey, keyMaterial?, now?)` | Verify, decrypt and expiry-check a `.mach` file (multi-scheme) |
 | `verifyMachineFileWithClaims(pem, scheme, publicKey, keyMaterial?, now?)` | The same, also returning the signed `iat`/`exp`/`jti`/`kid` |
+| `verifyLicenseFileWithKeySet(pem, keySet, licenseKey?, now?)` | Verify a `.lic` file against the signing key its `kid` names — survives a key rotation |
+| `verifyMachineFileWithKeySet(pem, keySet, keyMaterial?, now?)` | The same for an Ed25519-signed `.mach` file |
 | `verifyOfflineProof(proof, accountId, machineId, fingerprint, dataset, rsaPublicKey)` | Verify a `"v1x0."` offline proof token |
 
 ```ts
@@ -250,6 +252,93 @@ RSA public key in DER. Both DER encodings are accepted: the PKCS#1
 A machine file carries the same signed `meta.exp` a license file does, and it is
 enforced here too, so pass a trusted timestamp as the fifth argument (`now`)
 when the local clock cannot be trusted.
+
+### Surviving a signing-key rotation
+
+Verifying against a single embedded key has one failure mode worth designing
+around: when the account rotates its Ed25519 signing key, every file signed
+*before* the rotation stops verifying — and it fails with exactly the error a
+forged file produces. The file is authentic and the license may well still be
+valid, so a paying customer gets locked out and the error points support at
+tampering rather than at a stale key.
+
+Both file formats have always carried a `kid` claim naming the key that signed
+them. Verify through a `SigningKeySet` and the two outcomes separate:
+
+```ts
+import {
+  SigningKeySet,
+  SigningKeyError,
+  CheckoutError,
+  verifyLicenseFileWithKeySet,
+} from "@tamga/sdk";
+
+declare const pem: string;
+
+// Every public key your account has ever signed with, standard base64 of the
+// raw 32 bytes — the newest first, the retired ones after it. Pinned in the
+// binary, so this stays fully offline.
+const keySet = SigningKeySet.fromPublicKeys([
+  "<current key>",
+  "<key retired at the last rotation>",
+]);
+
+try {
+  const { license, claims } = await verifyLicenseFileWithKeySet(pem, keySet);
+  console.log(`Verified offline: ${license.id}, signed by key ${claims.kid}`);
+} catch (error) {
+  if (error instanceof SigningKeyError) {
+    // The file names a key you do not have. Almost always a key set that
+    // predates a rotation — refresh it or ship an update. Do NOT accuse the
+    // file, and do not lock the customer out over it.
+    console.warn(`${error.message} (set holds: ${keySet.keyIds.join(", ")})`);
+  } else if (error instanceof CheckoutError && error.kind === "crypto") {
+    // The file names a key you DO have, and the signature still failed.
+    // This one is a forgery.
+    throw error;
+  } else {
+    throw error;
+  }
+}
+```
+
+If the application can reach the API with an account-level credential, fetch the
+set instead of pinning it — one call, cacheable for the life of the process,
+since a rotation *adds* a key rather than invalidating the ones already there:
+
+```ts
+const keySet = await client.getSigningKeySet();
+```
+
+⚠️ `GET /signing-keys` is gated on `account.read`, which the license-key role
+does **not** hold, so `listSigningKeys()`/`getSigningKeySet()` answer `403` for
+an `Authorization: License <key>` client no matter how the account is
+configured. Fetch the set with a back-office token and ship the public keys with
+your application, or have your own backend proxy the call.
+
+Three things about this are deliberate and worth knowing before you build on it:
+
+- **Retired keys belong in the set.** Filtering down to the active key
+  reintroduces the very problem this solves.
+- **There is no "try every key" fallback.** The `kid` selects one key and only
+  that key is used. Trying them all would verify the same files while collapsing
+  "stale key set" and "forgery" back into one indistinguishable error.
+- **`SigningKeyError` has a third kind, `"no-published-signing-key"`.** The
+  server signs with `ed25519_public_key.unwrap_or_default()`, so an account whose
+  key was never published signs every file with the `kid` of the empty string.
+  No client-side action fixes that one, which is why it is not reported as a
+  merely stale key set.
+
+`signingKeyId(publicKeyBase64)` computes the `kid` for a key you hold. ⚠️ It
+hashes the **base64 string** the server publishes, not the 32 decoded bytes —
+pass the string exactly as it appears in `attributes.publicKey`.
+
+`verifyMachineFileWithKeySet` covers Ed25519-signed machine files only and
+refuses the other three schemes outright. `GET /signing-keys` publishes Ed25519
+keys and nothing else, so no set built from it could hold a key that verifies an
+RSA or ECDSA signature. Verify those with `verifyAndDecryptMachineFile` and the
+license's own `scheme`, and accept that a rotation is not a distinguishable
+outcome for them.
 
 > **Compatibility warning — offline license *and machine* files must be format
 > v2.** `alg` must end in `+v2` and the signed payload must carry its `meta`

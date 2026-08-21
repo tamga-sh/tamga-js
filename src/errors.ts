@@ -594,6 +594,82 @@ export class CheckoutError extends TamgaError {
 }
 
 /**
+ * Failures selecting a signing key by an offline file's `kid` claim, or
+ * building the {@link import("./checkout/keySet.js").SigningKeySet} to select
+ * from — see `src/checkout/keySet.ts`'s module doc comment.
+ *
+ * **Its own class on purpose, and the distinction is the whole point of
+ * verifying through a key set.** A file whose `kid` names no key the caller
+ * trusts has not been shown to be forged — the far likelier explanation is that
+ * the account rotated its signing key after the file was issued and this key set
+ * predates the rotation. Reporting that as a {@link CheckoutError} of kind
+ * `"crypto"`, which is what verification against a single embedded key does,
+ * sends a paying customer with an authentic file down the tampering path and
+ * sends support to the wrong place. These are different incidents:
+ *
+ * - `"unknown-key-id"` → refresh the key set (or ship an application update
+ *   carrying the new key) and retry. Do **not** accuse the file.
+ * - `"no-published-signing-key"` → the account published no Ed25519 key at all,
+ *   so the server signed with the empty string. No client-side action fixes
+ *   this; it is an account-configuration problem. See
+ *   {@link import("./crypto/keyId.js").UNBACKFILLED_ACCOUNT_KEY_ID}.
+ * - `"invalid-key"` → a key handed to
+ *   {@link import("./checkout/keySet.js").SigningKeySet.fromPublicKeys} is not
+ *   standard base64 of exactly 32 bytes. Raised eagerly, at construction, so a
+ *   typo in a key pinned in an application binary fails loudly at startup
+ *   rather than reporting every genuine file as signed by an unknown key, at
+ *   runtime, in the field.
+ *
+ * A file whose `kid` **is** in the set and whose signature then fails still
+ * raises `CheckoutError` of kind `"crypto"`, unchanged. That one is a forgery.
+ */
+export class SigningKeyError extends TamgaError {
+  constructor(
+    message: string,
+    readonly kind: "unknown-key-id" | "no-published-signing-key" | "invalid-key",
+    /**
+     * The `kid` involved, when there is one — verbatim, as the file claimed it.
+     * Log it next to
+     * {@link import("./checkout/keySet.js").SigningKeySet.keyIds} to see what
+     * the set did hold.
+     */
+    readonly keyId?: string,
+  ) {
+    super(message);
+    this.name = "SigningKeyError";
+  }
+
+  /**
+   * The file names a `kid` the supplied key set does not hold — a stale key
+   * set, not a forgery.
+   */
+  static unknownKeyId(keyId: string): SigningKeyError {
+    return new SigningKeyError(
+      `no signing key for kid "${keyId}" in the supplied key set — the account may have rotated its signing key since this file was issued; fetch the key set again`,
+      "unknown-key-id",
+      keyId,
+    );
+  }
+
+  /**
+   * The file's `kid` is `SHA-256("")`, so whatever signed it did so on an
+   * account with no published Ed25519 public key.
+   */
+  static noPublishedSigningKey(keyId: string): SigningKeyError {
+    return new SigningKeyError(
+      `this file names kid "${keyId}", the id of an empty signing key: the issuing account has no published Ed25519 public key, so no key set can ever verify it`,
+      "no-published-signing-key",
+      keyId,
+    );
+  }
+
+  /** A caller-supplied public key is not standard base64 of exactly 32 bytes. */
+  static invalidKey(detail: string): SigningKeyError {
+    return new SigningKeyError(`invalid Ed25519 public key: ${detail}`, "invalid-key");
+  }
+}
+
+/**
  * Failures while parsing or verifying a machine offline proof string
  * (`"v1x0.<base64 signature>"`) — see `src/proof.ts`'s module doc comment.
  */
