@@ -939,7 +939,12 @@ export class TamgaClient {
    *
    * ⚠️ The `machines` resource does not serialize `license_id`, so a machine
    * fetched by id carries no evidence of which license owns it. Use
-   * {@link listMachines} with `licenseId` when that matters.
+   * {@link listMachines} with `licenseId` when that matters — and note that
+   * this is not merely an inconvenience: no machine route applies the server's
+   * `require_license_scope` guard, and `machine.read`/`machine.update`/
+   * `machine.delete` are all in the license-key role's default permission set,
+   * so a license key can read, patch and delete **any** machine in the
+   * account. Reported upstream; do not treat a machine id as license-confined.
    */
   async getMachine(machineId: string): Promise<Machine> {
     const { data } = await sendJsonApi<Machine>(this.transport, {
@@ -1005,10 +1010,19 @@ export class TamgaClient {
    * `attributes.fingerprint === fingerprint` exactly — a substring hit on some
    * other machine's fingerprint must not be mistaken for this one.
    *
-   * The `licenseId` argument is required rather than optional on purpose. The
-   * `machines` resource omits `license_id`, so a machine found without that
-   * filter cannot be shown to belong to the license the caller asked about, and
-   * returning one would be a guess.
+   * The `licenseId` argument is required rather than optional on purpose, and
+   * the search is deliberately **not** widened to the account. The `machines`
+   * resource omits `license_id`, so a machine found without that filter cannot
+   * be shown to belong to the license the caller asked about — and under
+   * `machine_uniqueness_strategy: UNIQUE_PER_ACCOUNT` the row holding a
+   * fingerprint may belong to a completely different license. Handing that one
+   * back would be worse than returning nothing: the caller would heartbeat and
+   * check out a machine its license does not own, while its own
+   * `machines_count` stayed at zero. Preventing exactly that sharing is what
+   * the wider uniqueness scopes are *for*, so an account-wide search here would
+   * defeat the feature it is reacting to. Note the scopes still overlap: a
+   * genuine re-activation on this license is found under all three strategies,
+   * because each of their `EXISTS` checks includes this license's own rows.
    *
    * Walks up to `maxPages` pages of {@link MAX_PAGE_SIZE} rows (default 10, so
    * 1000 rows) and stops early at the last page the server reports.
@@ -1047,10 +1061,26 @@ export class TamgaClient {
    * reported resources therefore moves the license's usage — reporting memory
    * in bytes here inflates the license's tally exactly as it would at creation.
    *
-   * The response is built from the `UPDATE … RETURNING` row, which carries no
-   * policy join, so — unlike {@link getMachine} — its `next_heartbeat_at`
-   * reflects the 600 s fallback and its `heartbeat_status` cannot report
-   * `"DEAD"`. Re-read with {@link getMachine} if either matters.
+   * ⚠️ **Do not read heartbeat state off this response.** It is the one write
+   * on this resource that can report `"DEAD"`, and the one whose verdict can be
+   * wrong in both directions. `ping-heartbeat` cannot say `DEAD` because it
+   * sets `last_heartbeat_at = NOW()` and then judges against that same
+   * timestamp; `reset-heartbeat` nulls the column and `POST /machines` never
+   * sets it, so both answer `NOT_STARTED`. `PATCH` touches none of them — it
+   * leaves whatever was there and still derives a status from it. And its
+   * `UPDATE … RETURNING` carries no policy join, so that derivation uses the
+   * 600 s **fallback** rather than the policy's `heartbeat_duration`. Under a
+   * 3600 s policy a machine last seen 700 s ago reads `DEAD` here and `ALIVE`
+   * from {@link getMachine}; under a 60 s policy the disagreement runs the
+   * other way. `next_heartbeat_at` is off by the same amount. Re-read with
+   * {@link getMachine} when either field matters.
+   *
+   * ⚠️ **Not confined to the caller's own license.** The `machine.update`
+   * permission is in the license-key role's default set and no machine route
+   * applies the server's `require_license_scope` guard, so a license key can
+   * patch any machine in the account, not only its own. Reported upstream;
+   * there is no client-side fix. The same is true of {@link deleteMachine} and
+   * {@link getMachine}.
    */
   async updateMachine(machineId: string, attrs: UpdateMachineOptions): Promise<Machine> {
     const attributes: Record<string, unknown> = {};
@@ -1457,6 +1487,12 @@ export class TamgaClient {
    * carrying `release.read` and otherwise answers `401`/`403`; a `Closed`
    * product needs an admin, developer or product token. Credentials are sent
    * whenever configured, as everywhere else in this SDK.
+   *
+   * An unknown `productId` is a `404`
+   * ({@link import("./errors.js").NotFoundError}), raised before the upgrade
+   * check runs at all — worth distinguishing from the `204`, since it means the
+   * updater is configured with the wrong product rather than that it is
+   * current.
    *
    * All of `productId`/`platform`/`filetype`/`version` are required by the
    * server, and `channel` is required by this SDK — see

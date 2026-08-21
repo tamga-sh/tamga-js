@@ -436,12 +436,18 @@ Things this SDK deliberately does not do, or cannot do yet.
   roughly a million and gets the next activation on that license refused with
   `MEMORY_LIMIT_EXCEEDED`.
 - **`heartbeat_status: "DEAD"` never comes back from a ping, and does not
-  mean the machine was culled where it does.** Nothing built off a row the
-  request just wrote can report it: `pingHeartbeat` writes
-  `last_heartbeat_at = NOW()` and then derives the status from that same
-  timestamp, so it answers `ALIVE` or `RESURRECTED`; `resetHeartbeat` nulls
-  the column (`NOT_STARTED`); `createMachine` never sets it (`NOT_STARTED`);
-  and validate never emits `HEARTBEAT_DEAD`. Read-backed responses can, and
+  mean the machine was culled where it does.** The rule is about what the
+  request did to `last_heartbeat_at`, not about whether it wrote anything: a
+  write that *sets* the column cannot report `DEAD`, because the status is then
+  derived from the timestamp it just wrote. `pingHeartbeat` writes
+  `last_heartbeat_at = NOW()`, so it answers `ALIVE` or `RESURRECTED`;
+  `resetHeartbeat` nulls the column (`NOT_STARTED`); `createMachine` never sets
+  it (`NOT_STARTED`); and validate never emits `HEARTBEAT_DEAD`.
+  **`updateMachine` is the exception** — `PATCH /machines/{id}` leaves
+  `last_heartbeat_at` untouched and still derives a status from it, and its
+  `UPDATE … RETURNING` joins no policy, so it judges against the 600s fallback
+  and can disagree with a read in either direction. Do not read heartbeat state
+  off a patch response. Read-backed responses carry a real verdict, and
   this SDK has two: machine **checkout** resolves the machine through a
   lookup that joins the policy, so the `Machine` returned by
   `verifyAndDecryptMachineFile` carries a genuine staleness verdict that may

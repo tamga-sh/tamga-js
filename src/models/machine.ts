@@ -96,24 +96,35 @@ export interface MachineAttributes {
  * from it), see that field's doc for the exact recipe and its caveats. Learn
  * the window out of band only when no machine file is available.
  *
- * ⚠️ **Which responses can carry `DEAD` depends on how the row was
- * produced.** A response built off a row the request just wrote never can:
- * `pingHeartbeat` writes `last_heartbeat_at = NOW()` and then derives the
- * status from that same timestamp, so it answers `ALIVE` or `RESURRECTED`
- * and never `DEAD`; `resetHeartbeat` nulls the column (`NOT_STARTED`);
- * `createMachine` never sets it (`NOT_STARTED`); and license validate never
- * emits `HEARTBEAT_DEAD`.
+ * ⚠️ **Which responses can carry `DEAD` depends on what the request did to
+ * `last_heartbeat_at`** — not, as this was previously phrased, on whether the
+ * request wrote anything at all. A write that *sets* the column cannot report
+ * `DEAD`, because the status is then derived from the timestamp that write just
+ * put there: `pingHeartbeat` writes `last_heartbeat_at = NOW()` and so answers
+ * `ALIVE` or `RESURRECTED`; `resetHeartbeat` nulls it (`NOT_STARTED`);
+ * `createMachine` never sets it, and a null column is `NOT_STARTED` by
+ * definition. License validate never emits `HEARTBEAT_DEAD` either.
  *
- * A response built off a **read** can, and this SDK has two: machine
- * checkout resolves the machine through a lookup that joins the policy, so
- * the {@link Machine} that
+ * A write that leaves the column alone is **not** covered by that rule, and
+ * there is one: {@link import("../client.js").TamgaClient.updateMachine}.
+ * `PATCH /machines/{id}` touches `name`/`ip`/`hostname`/`platform`/`cores`/
+ * `memory`/`disk`/`metadata` and nothing else, so it still derives a status
+ * from whatever `last_heartbeat_at` already held — and its
+ * `UPDATE … RETURNING` joins no policy, so it judges that against the 600 s
+ * fallback instead of the policy's window. Its verdict can therefore differ
+ * from a read's in either direction. Do not read heartbeat state off a patch.
+ *
+ * A response built off a **read** carries a genuine verdict, and this SDK has
+ * four: {@link import("../client.js").TamgaClient.getMachine} and
+ * {@link import("../client.js").TamgaClient.listMachines}, machine checkout
+ * (so the {@link Machine} that
  * {@link import("../checkout/machineFile.js").verifyAndDecryptMachineFile}
- * returns carries a genuine staleness verdict and its `heartbeat_status` may
- * be `DEAD`; the `machine` half of
- * {@link import("../client.js").TamgaClient.generateOfflineProof} is built
- * the same way. (`GET /machines/{id}` would too — this SDK exposes no
- * machine read.) So branch on `DEAD` **there** if you have a use for it;
- * just never on a ping response, where it cannot appear.
+ * returns may read `DEAD`), and the `machine` half of
+ * {@link import("../client.js").TamgaClient.generateOfflineProof}. All four
+ * resolve through a lookup that joins the policy, so their status *and* their
+ * `next_heartbeat_at` are judged against the real window. So branch on `DEAD`
+ * **there** if you have a use for it; just never on a ping response, where it
+ * cannot appear.
  *
  * ⚠️ **And `DEAD` does not mean the machine was culled.** It means one
  * thing only: the last ping is older than the window. The row is still

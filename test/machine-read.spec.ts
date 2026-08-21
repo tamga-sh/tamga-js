@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { TamgaClient } from "../src/client.js";
 import type { UpdateMachineOptions } from "../src/client.js";
+import { heartbeatWindowMsFromMachine } from "../src/models/machine.js";
 import { jsonApi, lastCall, mockJsonApiResponse, mockSequence, nthCall, sentJsonBody } from "./helpers/mockFetch.js";
 
 afterEach(() => {
@@ -237,6 +238,32 @@ describe("TamgaClient.updateMachine", () => {
     const [, init] = lastCall(fetchMock);
     const body = sentJsonBody(init) as { data: { attributes: Record<string, unknown> } };
     expect(Object.keys(body.data.attributes)).toEqual(["name"]);
+  });
+
+  it("can report DEAD — the one write on this resource that can", async () => {
+    // The write-vs-read rule is about `last_heartbeat_at`, not about writes in
+    // general. `ping-heartbeat` sets it and so can only answer ALIVE or
+    // RESURRECTED; `reset-heartbeat` nulls it; `POST /machines` never sets it.
+    // PATCH touches none of them, so it still derives a status from whatever
+    // was already there — and `queries::update`'s RETURNING joins no policy, so
+    // it judges against the 600s fallback rather than the policy window. Its
+    // verdict can therefore disagree with `getMachine` in either direction.
+    mockJsonApiResponse({
+      id: "m-1",
+      type: "machines",
+      attributes: {
+        fingerprint: "fp-1",
+        heartbeat_status: "DEAD",
+        last_heartbeat_at: "2026-08-21T00:00:00.000Z",
+        next_heartbeat_at: "2026-08-21T00:10:00.000Z",
+      },
+    });
+    const result = await client().updateMachine("m-1", { name: "renamed" });
+
+    expect(result.attributes.heartbeat_status).toBe("DEAD");
+    // 600s exactly — the fallback, not a policy window. A caller deriving the
+    // heartbeat window from a patch response gets the fallback every time.
+    expect(heartbeatWindowMsFromMachine(result)).toBe(600_000);
   });
 
   it("sends an empty attributes object for an empty patch", async () => {

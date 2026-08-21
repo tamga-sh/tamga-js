@@ -18,6 +18,25 @@ whose `next_heartbeat_at` reflects the policy instead of the 600s fallback.
 same no-op) and its `cores`/`memory`/`disk` move the license's running totals,
 so the megabytes-not-bytes rule applies there too.
 
+⚠️ `updateMachine` is also a **counterexample to the write-vs-read heartbeat
+rule** this SDK documents elsewhere, and the docs are corrected accordingly. The
+rule is about what a request does to `last_heartbeat_at`, not about whether it
+writes at all: a write that *sets* the column cannot report `"DEAD"`, because
+the status is then derived from the timestamp it just wrote. `PATCH` touches
+only the descriptive columns, so it still derives a status from whatever was
+already there — and its `UPDATE … RETURNING` joins no policy, so it judges
+against the 600s fallback rather than the policy's window. Under a 3600s policy
+a machine last seen 700s ago reads `DEAD` from a patch and `ALIVE` from
+`getMachine`; under a 60s policy the disagreement runs the other way. Do not
+read heartbeat state off a patch response.
+
+⚠️ **Machine routes are not license-scoped.** `machine.read`, `machine.update`
+and `machine.delete` are all in the license-key role's default permission set,
+and no machine route applies the server's `require_license_scope` guard — so a
+license key can read, patch and delete any machine in the account, not only its
+own. This is an upstream issue; the SDK cannot fix it and does not describe that
+surface as scoped.
+
 ⚠️ **`listMachines` is offset-paginated and every other list here is keyset.**
 It takes `page`/`size` and returns `{ items, page: { number, size, total,
 totalPages } }`; `listComponents` and `listMachineProcesses` take `limit`/`after`
@@ -96,7 +115,11 @@ gate withholds. Word it to users as *no update is available to you*, never as
 *you are on the latest version*: the second is a claim this endpoint cannot
 support, and it is wrong precisely for the customers whose licence lapsed. A
 suspended licence is the third outcome and is not collapsed — it throws
-`ForbiddenError`. Two more traps: leaving `constraint` unset is not "no
+`ForbiddenError`, and an unknown `productId` is a `404` raised before the check
+runs at all, which is worth distinguishing from the `204` because it means the
+updater is pointed at the wrong product rather than that it is current.
+`enforce_distribution_strategy` can also answer `401`/`403` for a `Licensed` or
+`Closed` product reached without an adequate credential. Two more traps: leaving `constraint` unset is not "no
 constraint" (the server substitutes a pessimistic `~{major}.{minor}.{patch}`, so
 an updater on 1.2.0 is never offered 1.3.0), and `channel` is required by this
 SDK even though the server allows omitting it, because omitting it drops the
@@ -110,6 +133,13 @@ from the server's `Host`-header check, which makes it the test that tells a
 call is returning `403 "The Host header does not match any configured host"` and
 this one succeeds, the fault is the deployment's configuration, not the caller's
 key.
+
+**Not included.** `GET|PATCH /machines/{id}/group` and `.../owner` are left
+out. They answer with `groups` and `users` resources — two entirely new resource
+domains no Tamga SDK models, and `users` is camelCase besides — and setting
+either requires a group or user id an embedded client has no way to enumerate.
+They are an admin-console concern, and pulling two new resource models into a
+machine-lifecycle release to reach them would be the wrong trade.
 
 New exported types: `ListMachinesOptions`, `MachineSortField`, `SortOrder`,
 `UpdateMachineOptions`, `UpgradeCheckOptions`, `OffsetPage`, `OffsetPageMeta`,
