@@ -6,8 +6,16 @@
  * driven by `policy.heartbeat_duration` despite that field existing.
  * `startHeartbeat` here pings every 3 minutes (a third of the window), a
  * safe margin against network jitter.
+ *
+ * ⚠️ DEAD is not a terminal state and does not mean the machine was culled.
+ * It means only that the last ping is older than the window. Culling runs
+ * exclusively for policies with `require_heartbeat = true`, which is not the
+ * default, so a machine can report DEAD forever with its row and its seat
+ * intact — and a ping to a DEAD machine succeeds and revives it. The only
+ * signal that the row is really gone is a 404 from the ping, which is what
+ * this example re-activates on.
  */
-import { TamgaClient, MACHINE_HEARTBEAT_WINDOW_MS } from "@tamga/sdk";
+import { TamgaClient, NotFoundError, MACHINE_HEARTBEAT_WINDOW_MS } from "@tamga/sdk";
 
 const client = new TamgaClient({
   accountId: process.env.TAMGA_ACCOUNT_ID ?? "your-account-id",
@@ -38,19 +46,39 @@ console.log(`Machine ${machine.id} created, heartbeat_status: ${machine.attribut
 const stop = client.startHeartbeat(machine.id, MACHINE_HEARTBEAT_WINDOW_MS / 3);
 
 // Periodically check status yourself — startHeartbeat only pings, it
-// doesn't surface heartbeat_status transitions on its own.
+// doesn't surface heartbeat_status transitions on its own, and it swallows
+// every ping failure including the 404 that matters here.
 const statusCheck = setInterval(async () => {
-  const current = await client.pingHeartbeat(machine.id);
+  let current;
+  try {
+    current = await client.pingHeartbeat(machine.id);
+  } catch (error) {
+    if (error instanceof NotFoundError) {
+      // The row really is gone (deleted, or culled under a
+      // require_heartbeat policy with heartbeat_cull_strategy:
+      // DEACTIVATE_DEAD). THIS is the re-activation trigger — call
+      // createMachine again with the same fingerprint here.
+      console.log("Ping returned 404 — the machine row is gone, re-activating.");
+      clearInterval(statusCheck);
+      stop();
+      return;
+    }
+    // Anything else (network blip, 429 exhaustion, 5xx) is transient: leave
+    // both timers running and try again on the next tick.
+    console.warn("Heartbeat check failed, retrying next tick:", error);
+    return;
+  }
+
   if (current.attributes.heartbeat_status === "DEAD") {
-    // The window elapsed before a ping arrived — the server may cull this
-    // row (heartbeat_cull_strategy: DEACTIVATE_DEAD) or keep it
-    // (KEEP_DEAD). Treat DEAD as "machine likely deleted server-side —
-    // re-activate rather than keep retrying ping."
-    console.log("Machine went DEAD — re-activating.");
-    clearInterval(statusCheck);
-    stop();
+    // The window elapsed before a ping arrived. Nothing has been deleted:
+    // the ping that just returned this status already wrote
+    // last_heartbeat_at, so the machine is live again. Do NOT stop the
+    // scheduler and do NOT re-activate here — under the default policy
+    // (require_heartbeat = false) the row is never culled and re-activating
+    // would just burn a second seat.
+    console.log("Machine read DEAD — the ping above revived it; heartbeat continues.");
   } else if (current.attributes.heartbeat_status === "RESURRECTED") {
-    console.log("Machine came back within the resurrection grace period.");
+    console.log("Machine came back after a recorded death event.");
   }
 }, MACHINE_HEARTBEAT_WINDOW_MS);
 

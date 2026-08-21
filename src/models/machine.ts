@@ -60,8 +60,24 @@ export interface MachineAttributes {
  *
  * ⚠️ The window is a **hardcoded 600s (10 min)**, NOT driven by
  * `policy.heartbeat_duration` despite that field existing on the policy
- * resource. Treat `DEAD` as "machine likely deleted server-side —
- * re-activate rather than retry ping."
+ * resource.
+ *
+ * ⚠️ **`DEAD` does not mean the machine was culled.** It means one thing
+ * only: the last ping is older than that window. The row is still there, the
+ * seat is still taken, and nothing has been deleted or deactivated. The cull
+ * job that would remove it runs only for policies with
+ * `require_heartbeat = true`, and that column **defaults to `false`** — under
+ * a default policy nothing is ever culled, so a machine reports `DEAD`
+ * forever while its row and its seat survive. `heartbeat_status` is computed
+ * from `last_heartbeat_at` versus the window and never consults
+ * `require_heartbeat`, so the status alone cannot tell you which policy you
+ * are under.
+ *
+ * **Keep pinging through `DEAD`.** `ping-heartbeat` on a `DEAD` machine is a
+ * bare `last_heartbeat_at = now` write with no resurrection check, so it
+ * succeeds and revives the machine. The one signal that the row is really
+ * gone is a `404 NOT_FOUND` (`NotFoundError`) from the ping itself — hang
+ * re-activation off that, never off `DEAD`.
  *
  * The trailing `string & {}` member is the standard open-union escape
  * hatch — see `src/models/validation.ts`'s module doc for the rationale.

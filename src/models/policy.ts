@@ -87,12 +87,28 @@ export function resolveOverageStrategy(raw: string): OverageStrategy {
   }
 }
 
-/** What happens to a machine row once its heartbeat window elapses. */
+/**
+ * What the server's cull job does with a machine row whose heartbeat window
+ * has elapsed.
+ *
+ * ⚠️ **Only consulted when the policy sets `require_heartbeat = true`**, and
+ * that column defaults to `false`: the cull job returns early for such a
+ * policy and never claims its machines, so under a default policy neither
+ * variant here ever runs and no row is ever culled. A machine's
+ * `heartbeat_status` reaching `"DEAD"` is therefore not evidence that this
+ * strategy was applied — see
+ * {@link import("./machine.js").HeartbeatStatus}.
+ */
 export type HeartbeatCullStrategy = "DEACTIVATE_DEAD" | "KEEP_DEAD";
 
 /**
- * How long after heartbeat expiry a dead machine may still be revived by a
- * new ping, before {@link HeartbeatCullStrategy} takes effect.
+ * How long after heartbeat expiry the cull job still lets a dead machine be
+ * revived, before {@link HeartbeatCullStrategy} takes effect.
+ *
+ * ⚠️ This governs the cull job only — it is **not** a window on
+ * `ping-heartbeat`. The ping handler is a bare `last_heartbeat_at = now`
+ * write with no resurrection check, so a ping revives a `DEAD` machine
+ * whatever this says, for as long as the row exists.
  */
 export type HeartbeatResurrectionStrategy =
   | "NO_REVIVE"
@@ -231,7 +247,14 @@ export interface PolicyAttributes {
   check_in_interval: CheckInInterval | null;
   /** Check-in cadence multiplier (e.g. `2` + `"week"` = every 2 weeks). */
   check_in_interval_count: number | null;
-  /** Whether machines under this policy must send heartbeats. */
+  /**
+   * Whether machines under this policy must send heartbeats. **Defaults to
+   * `false`**, and the server's cull job returns early for any policy where
+   * it is `false` — so on a default policy a machine that stops pinging
+   * reports `heartbeat_status: "DEAD"` indefinitely and is never culled,
+   * deactivated or deleted. See {@link import("./machine.js").HeartbeatStatus}
+   * and {@link HeartbeatCullStrategy}.
+   */
   require_heartbeat: boolean;
   /**
    * ⚠️ Declared here but **not actually driving the heartbeat window** — the
@@ -243,7 +266,8 @@ export interface PolicyAttributes {
   /**
    * Raw wire string (not the typed {@link HeartbeatCullStrategy}) — unlike
    * `heartbeat_resurrection_strategy` this field has no documented
-   * invalid-default gotcha requiring lenient fallback parsing.
+   * invalid-default gotcha requiring lenient fallback parsing. ⚠️ Inert
+   * unless {@link require_heartbeat} is `true`.
    */
   heartbeat_cull_strategy: string;
   /**

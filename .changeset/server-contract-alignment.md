@@ -33,3 +33,18 @@ bytes; `scope.entitlements` and `scope.fingerprint` are genuinely enforced;
 `generateOfflineProof` are role-gated and always `403` under license-key auth;
 the release/auto-update endpoint works and the earlier "it crashes" note was
 wrong.
+
+Also corrected: a machine's `heartbeat_status` of `"DEAD"` was documented
+throughout as "the row was culled — re-activate instead of pinging". That is
+wrong. `DEAD` means only that the last ping is older than the hardcoded 600s
+window: the server's cull job runs exclusively for policies with
+`require_heartbeat = true`, which defaults to `false`, so under a default
+policy no row is ever culled and a machine reports `DEAD` indefinitely with
+its row and its seat intact. A ping to a `DEAD` machine is a bare
+`last_heartbeat_at = now` write with no resurrection check — it succeeds and
+revives the machine — so a scheduler must keep pinging through `DEAD`, and
+`startHeartbeat` does. The only dependable "the row is gone" signal is a
+`404 NOT_FOUND` (`NotFoundError`) from the ping itself, which is where
+re-activation belongs. Docs, JSDoc and the `docs/examples/machine-heartbeat.ts`
+example are updated accordingly, and the scheduler now has a regression test
+proving it keeps pinging across three consecutive `DEAD` responses.

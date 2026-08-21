@@ -84,7 +84,7 @@ method sends whatever `auth` transport was configured.
 | `getEntitlement(licenseId, entitlementId)` | `GET /licenses/{id}/entitlements/{entitlementId}` |
 | `hasEntitlement(licenseId, code, limit?)` | convenience wrapper around `listEntitlements` |
 
-Four of these need a caveat before you wire them in:
+Five of these need a caveat before you wire them in:
 
 - `quickValidate` does not record the validation when the request carries an
   `Origin` header — which a browser always adds. See **Known gaps**.
@@ -92,6 +92,9 @@ Four of these need a caveat before you wire them in:
   for a license-key credential. See **Auth transports**.
 - `listEntitlements` ignores `after`: that route is not paginable server-side.
 - `createMachine`'s `memory` / `disk` are **megabytes**.
+- `startHeartbeat` deliberately keeps pinging through a `"DEAD"`
+  `heartbeat_status` — `DEAD` does not mean the machine was removed. See
+  **Known gaps**.
 
 Errors are typed subclasses of `TamgaError` (`NotFoundError`,
 `FingerprintTakenError`, `MachineLimitExceededError`,
@@ -335,6 +338,22 @@ Things this SDK deliberately does not do, or cannot do yet.
   16 GB as `17179869184` instead of `16384` inflates the account tally by
   roughly a million and gets the next activation on that license refused with
   `MEMORY_LIMIT_EXCEEDED`.
+- **`heartbeat_status: "DEAD"` does not mean the machine was culled.** It
+  means one thing only: the last ping is older than the hardcoded 600s
+  window. The server's cull job runs exclusively for policies with
+  `require_heartbeat = true`, and that column **defaults to `false`** — so
+  under a default policy no machine row is ever culled, and a machine that
+  stops pinging reports `DEAD` indefinitely with its row and its seat intact.
+  `heartbeat_status` is derived from `last_heartbeat_at` alone and never
+  consults `require_heartbeat`, so the status cannot tell you which case you
+  are in. A ping to a `DEAD` machine is a bare `last_heartbeat_at = now`
+  write with no resurrection check: it succeeds and revives the machine.
+  **Keep the heartbeat running through `DEAD`** — stopping the scheduler or
+  re-activating on it only burns a second seat. The one dependable "the row
+  is gone" signal is a `404 NOT_FOUND` (`NotFoundError`) from the ping
+  itself; hang re-activation off that. `startHeartbeat` swallows every ping
+  failure, that 404 included, so a client that must react to deletion should
+  drive `pingHeartbeat` on its own timer and catch `NotFoundError`.
 - **Ten of the 24 `ValidationCode` values are not reachable today.** They are
   modelled for forward-compatibility (`src/models/validation.ts`); do not write
   logic that depends on receiving one. (`ENTITLEMENTS_MISSING` and

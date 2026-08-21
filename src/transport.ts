@@ -304,7 +304,8 @@ const RETRYABLE_POST_SUFFIXES = [
  * in `/actions/ping` (that suffix is the *process* ping route) and so need
  * their own entries. Both are bare timestamp writes with no counter attached,
  * so repeating them is unconditionally safe — and dropping a throttled
- * heartbeat is how a live machine gets culled.
+ * heartbeat is how a live machine flips to `DEAD` (and, under a policy with
+ * `require_heartbeat = true`, eventually gets culled).
  *
  * The rate limiter buckets per `(caller, route pattern)`, and with proxy
  * headers untrusted every caller collapses into one bucket per route — so a

@@ -553,12 +553,22 @@ export class TamgaClient {
    * Starts a `pingHeartbeat` timer for `machineId`, pinging every
    * `intervalMs`. Pick an interval well inside the hardcoded 600s window
    * (e.g. a third of it) — see `src/models/machine.ts`'s
-   * `MACHINE_HEARTBEAT_WINDOW_MS`. Treat a resulting `heartbeat_status` of
-   * `"DEAD"` as "machine likely deleted server-side — re-activate rather
-   * than retry ping." Returns a stop function; ping failures are swallowed
-   * (the timer keeps running) so a single transient network blip doesn't
-   * kill the scheduler — callers wanting failure visibility should poll
-   * `pingHeartbeat` directly instead.
+   * `MACHINE_HEARTBEAT_WINDOW_MS`. Returns a stop function.
+   *
+   * ⚠️ **Never stop this timer because `heartbeat_status` reads `"DEAD"`.**
+   * `DEAD` means only that the last ping is older than the window — not that
+   * the row was culled. Culling runs only under `require_heartbeat = true`,
+   * which is **not** the default, so a machine can sit at `DEAD` indefinitely
+   * with its row and its seat intact. A ping to a `DEAD` machine succeeds and
+   * revives it, so this scheduler deliberately keeps pinging straight through
+   * `DEAD` — see {@link import("./models/machine.js").HeartbeatStatus}.
+   *
+   * Ping failures are swallowed (the timer keeps running) so a single
+   * transient network blip doesn't kill the scheduler. That includes the
+   * `404 NOT_FOUND` ({@link import("./errors.js").NotFoundError}) that is the
+   * only real "the row is gone" signal, so this helper cannot surface it:
+   * callers that need to re-activate on deletion should drive
+   * {@link pingHeartbeat} on their own timer and catch `NotFoundError`.
    */
   startHeartbeat(machineId: string, intervalMs: number): () => void {
     const timer = setInterval(() => {

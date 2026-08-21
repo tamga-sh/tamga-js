@@ -29,7 +29,8 @@ describe("retry eligibility", () => {
   it("retries the machine heartbeat routes, which do not end in /actions/ping", () => {
     // `/actions/ping` is the *process* route. `ping-heartbeat` and
     // `reset-heartbeat` don't match that suffix, so they need their own
-    // entries — and a dropped heartbeat is what gets a live machine culled.
+    // entries — and a dropped heartbeat is what flips a live machine to
+    // DEAD (and, under require_heartbeat, eventually gets it culled).
     // Both are bare timestamp writes with no counter attached, so repeating
     // them cannot burn a seat the way repeating `POST /machines` can.
     expect(isRetryable("POST", "/v1/accounts/acc/machines/m-1/actions/ping-heartbeat")).toBe(true);
