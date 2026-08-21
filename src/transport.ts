@@ -34,7 +34,9 @@
  *   `ping-heartbeat`, `reset-heartbeat`) — creates are excluded, because
  *   repeating `POST /machines` can burn a second seat.
  * - A per-attempt request deadline ({@link DEFAULT_TIMEOUT_MS}, overridable
- *   via {@link TransportConfig.timeoutMs}) — see {@link doFetch}.
+ *   via {@link TransportConfig.timeoutMs}) covering the **whole** attempt,
+ *   body read included, not just the wait for response headers — see
+ *   {@link doFetch}.
  *
  * Auth **is** enforced server-side on the endpoints this SDK calls. A
  * license-key credential is additionally gated on the license's policy:
@@ -105,6 +107,10 @@ export interface TransportConfig {
    * Per-attempt request deadline in milliseconds. Defaults to
    * {@link DEFAULT_TIMEOUT_MS}. `0` (or any non-positive value) disables the
    * deadline entirely, restoring the pre-0.3.4 "wait forever" behaviour.
+   *
+   * Covers the **entire** attempt: connect, response headers, and the body
+   * read. `fetch` resolves on headers alone, so a deadline that stopped there
+   * would leave a stalled body unbounded — see {@link doFetch}.
    */
   timeoutMs?: number;
 }
@@ -126,6 +132,7 @@ export const DEFAULT_API_VERSION = "1.8";
  * diagnosable failure.
  *
  * Applied per attempt, not per call: a 429 retry gets its own full budget.
+ * Within an attempt it covers the body read too, not just the headers.
  */
 export const DEFAULT_TIMEOUT_MS = 45_000;
 
@@ -353,9 +360,22 @@ export function retryDelayMs(attempt: number, retryAfter?: number): number {
 }
 
 /**
- * Performs the actual `fetch` call, wrapping network failures in
- * {@link TamgaNetworkError}, and transparently retrying while the server
- * answers 429.
+ * Performs the actual `fetch` call **and reads the response body**, wrapping
+ * network failures in {@link TamgaNetworkError} and transparently retrying
+ * while the server answers 429.
+ *
+ * ⚠️ The body read belongs here, not in the callers, because `fetch` resolves
+ * as soon as the response *headers* arrive — the body may still be streaming.
+ * Disarming the deadline at that point would leave the body read unbounded,
+ * so a stalling proxy (or a peer holding the connection open) could hang a
+ * call forever behind a `timeoutMs` that had already been cleared. Reading
+ * here keeps one `AbortController` armed across the whole attempt, which is
+ * what {@link TransportConfig.timeoutMs} promises. The `finally` still clears
+ * on every exit path, so no timer outlives its attempt.
+ *
+ * Returning the text alongside the response also makes the single-read rule
+ * structural: a `Response` body can only be consumed once, and now exactly
+ * one place consumes it.
  *
  * Credential-accepting endpoints run on a tight per-IP budget (5 req/s by
  * default), and the calls a licensing client makes on a timer are exactly the
@@ -367,14 +387,17 @@ async function doFetch(
   init: RequestInit,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   maxRetries = DEFAULT_MAX_RETRIES,
-): Promise<Response> {
+): Promise<{ response: Response; text: string }> {
   const retryable = isRetryable(init.method ?? "GET", url.pathname);
 
   for (let attempt = 0; ; attempt++) {
     let response: Response;
+    let text: string;
     const deadline = startDeadline(timeoutMs);
     try {
       response = await fetch(url, deadline.signal ? { ...init, signal: deadline.signal } : init);
+      // Still inside the deadline: `fetch` above resolved on headers alone.
+      text = await response.text();
     } catch (error) {
       throw new TamgaNetworkError(
         deadline.expired
@@ -387,7 +410,7 @@ async function doFetch(
     }
 
     if (response.status !== 429 || !retryable || attempt >= maxRetries) {
-      return response;
+      return { response, text };
     }
 
     const delay = retryDelayMs(attempt, parseRetryAfter(response));
@@ -423,9 +446,16 @@ function startDeadline(timeoutMs: number): {
   return state;
 }
 
-/** Parses a response body as JSON, wrapping malformed JSON in {@link TamgaParseError}. */
-async function parseJson(response: Response): Promise<unknown> {
-  const text = await response.text();
+/**
+ * Parses an already-read response body as JSON, wrapping malformed JSON in
+ * {@link TamgaParseError}.
+ *
+ * Takes text rather than a `Response` so the read itself stays inside
+ * {@link doFetch}'s deadline — and so a parse failure surfaces as
+ * `TamgaParseError` rather than being swallowed into the network-error
+ * wrapper.
+ */
+function parseJsonText(text: string): unknown {
   if (text.length === 0) return undefined;
   try {
     return JSON.parse(text);
@@ -466,13 +496,13 @@ export async function sendJsonApi<T>(
 ): Promise<TransportResult<T>> {
   const url = buildUrl(config, opts.path, opts.query);
   const headers = buildHeaders(config, "application/vnd.api+json");
-  const response = await doFetch(
+  const { response, text } = await doFetch(
     url,
     buildInit(opts.method, headers, opts.body),
     config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
   );
   const responseInfo = extractResponseInfo(response.headers);
-  const body = await parseJson(response);
+  const body = parseJsonText(text);
   if (!response.ok) {
     throw apiErrorFromResponseBody(response.status, body);
   }
@@ -492,13 +522,13 @@ export async function sendJsonApiWithMeta<T, M>(
 ): Promise<TransportResultWithMeta<T, M>> {
   const url = buildUrl(config, opts.path, opts.query);
   const headers = buildHeaders(config, "application/vnd.api+json");
-  const response = await doFetch(
+  const { response, text } = await doFetch(
     url,
     buildInit(opts.method, headers, opts.body),
     config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
   );
   const responseInfo = extractResponseInfo(response.headers);
-  const body = await parseJson(response);
+  const body = parseJsonText(text);
   if (!response.ok) {
     throw apiErrorFromResponseBody(response.status, body);
   }
@@ -517,13 +547,13 @@ export async function sendFlat<T>(
 ): Promise<TransportResult<T>> {
   const url = buildUrl(config, opts.path, opts.query);
   const headers = buildHeaders(config);
-  const response = await doFetch(
+  const { response, text } = await doFetch(
     url,
     { method: opts.method, headers },
     config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
   );
   const responseInfo = extractResponseInfo(response.headers);
-  const body = await parseJson(response);
+  const body = parseJsonText(text);
   if (!response.ok) {
     throw apiErrorFromResponseBody(response.status, body);
   }
@@ -541,15 +571,22 @@ export async function sendRaw(
 ): Promise<TransportResult<string>> {
   const url = buildUrl(config, opts.path, opts.query);
   const headers = buildHeaders(config);
-  const response = await doFetch(
+  const { response, text } = await doFetch(
     url,
     { method: opts.method, headers },
     config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
   );
   const responseInfo = extractResponseInfo(response.headers);
   if (!response.ok) {
-    const body = await parseJson(response).catch(() => undefined);
+    // A raw route's error body is still JSON:API, but a non-JSON one must not
+    // mask the HTTP error — decode it if it parses, ignore it if it doesn't.
+    let body: unknown;
+    try {
+      body = parseJsonText(text);
+    } catch {
+      body = undefined;
+    }
     throw apiErrorFromResponseBody(response.status, body);
   }
-  return { data: await response.text(), responseInfo };
+  return { data: text, responseInfo };
 }

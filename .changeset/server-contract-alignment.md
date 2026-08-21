@@ -15,7 +15,10 @@ explicit `limit=100` instead of falling into the server's silent 25-row
 default; `/actions/ping-heartbeat` and `/actions/reset-heartbeat` are now
 retried after a `429` like the other idempotent actions; requests have a 45s
 per-attempt deadline (`TamgaClientConfig.timeoutMs`, `0` disables it) where
-they previously had none.
+they previously had none, and that deadline stays armed across the
+response-body read rather than being released once headers arrive — `fetch`
+resolves on headers alone, so a peer that stalls the body could otherwise hang
+a call with no client-side ceiling.
 
 Additions: typed subclasses for `MACHINE_LIMIT_EXCEEDED`,
 `CORE_LIMIT_EXCEEDED`, `MEMORY_LIMIT_EXCEEDED`, `DISK_LIMIT_EXCEEDED`,

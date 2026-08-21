@@ -21,6 +21,8 @@ import {
   MachineLimitExceededError,
   MemoryLimitExceededError,
   TamgaApiErrorException,
+  TamgaNetworkError,
+  TamgaParseError,
   TooManyProcessesError,
 } from "../src/errors.js";
 import { mockApiError, lastCall } from "./helpers/mockFetch.js";
@@ -317,6 +319,71 @@ describe("request deadline", () => {
       );
 
       await expect(client().quickValidate("lic-1")).resolves.toMatchObject({ code: "VALID" });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("aborts a response whose headers arrive promptly but whose body stalls", async () => {
+    // The case a header-only deadline misses. `fetch` resolves as soon as the
+    // response headers land, so disarming the abort there bounds nothing but
+    // the header wait: a stalling proxy — or a peer holding the connection
+    // open — can then trickle (or never finish) the body and hang the call
+    // forever. Headers here arrive immediately and a first chunk even lands;
+    // the stream simply never closes, so only an abort still armed across the
+    // body read can end it.
+    const fetchMock = vi.fn().mockImplementation((_url: URL, init: RequestInit) => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"ts":"2026-01-01T00:00:00Z",'));
+          init.signal?.addEventListener("abort", () => {
+            controller.error(new DOMException("The operation was aborted.", "AbortError"));
+          });
+          // Deliberately no controller.close() — the body never completes.
+        },
+      });
+      return Promise.resolve(
+        new Response(body, { status: 200, headers: { "Content-Type": "application/json" } }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const stalling = new TamgaClient({
+      accountId: "acct_1",
+      baseUrl: "https://api.tamga.sh",
+      timeoutMs: 20,
+    });
+
+    const failure = await stalling.quickValidate("lic-1").catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(TamgaNetworkError);
+    expect((failure as Error).message).toMatch(/timed out after 20ms/);
+    // The request itself was fine — headers arrived and were never retried.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("disarms the deadline when the body arrives but fails to parse", async () => {
+    // The other exit path out of a completed read. Parsing happens outside the
+    // deadline's scope now, so a `TamgaParseError` cannot leak the timer —
+    // and it must still surface as a parse error, not as a network failure.
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal(
+        "fetch",
+        vi
+          .fn()
+          .mockImplementation(() =>
+            Promise.resolve(
+              new Response("<html>not json</html>", {
+                status: 200,
+                headers: { "Content-Type": "application/json" },
+              }),
+            ),
+          ),
+      );
+
+      await expect(client().quickValidate("lic-1")).rejects.toBeInstanceOf(TamgaParseError);
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();

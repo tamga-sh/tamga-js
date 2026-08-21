@@ -69,6 +69,10 @@ export interface TamgaClientConfig {
    * Per-attempt request deadline in milliseconds. Defaults to
    * {@link import("./transport.js").DEFAULT_TIMEOUT_MS} (45s). Pass `0` to
    * disable the deadline and wait indefinitely.
+   *
+   * Bounds the whole attempt — connect, headers **and** the response body
+   * read — so a peer that returns headers promptly and then stalls the body
+   * still hits the deadline.
    */
   timeoutMs?: number;
 }

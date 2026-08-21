@@ -278,7 +278,11 @@ claim below names the code that implements it.
   `TamgaClientConfig.timeoutMs`, or disabled with `0`. It sits deliberately
   past the API's own 30s gateway timeout so the server wins that race and you
   get its `504` — the response that carries the `X-Request-Id` support needs
-  — instead of an opaque local abort.
+  — instead of an opaque local abort. The deadline covers the **whole**
+  attempt including the response-body read: `fetch` resolves as soon as
+  headers arrive, so a deadline released at that point would leave a peer
+  that stalls the body (a wedged proxy, a connection held open) able to hang
+  the call indefinitely (`src/transport.ts::doFetch`).
 
 Reporting a vulnerability: see [`SECURITY.md`](./SECURITY.md).
 
