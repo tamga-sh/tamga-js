@@ -245,3 +245,50 @@ export async function buildMachinePem(
   const pemBody = base64Encode(enc.encode(certJson));
   return { publicKey, pem: `-----BEGIN MACHINE FILE-----\n${pemBody}\n-----END MACHINE FILE-----` };
 }
+
+/**
+ * Builds an Ed25519-signed `.mach` PEM with a **caller-supplied** signing key,
+ * so a test can name a `kid` in the payload and control which key actually
+ * signed the bytes — the two must be varied independently to tell a stale key
+ * set apart from a forgery.
+ *
+ * {@link buildMachinePem} generates its own keypair and cannot express that.
+ *
+ * ⚠️ Still self-generated, and still not evidence of interop — see this file's
+ * header. What it is used for here is the negative space: a file naming a key
+ * nobody holds, and a file naming a key held by someone who did not sign it.
+ */
+export async function buildEd25519MachinePemWithKey(
+  payloadJson: string,
+  signingSecretKey: Uint8Array,
+  encryptionKey?: Uint8Array,
+): Promise<string> {
+  let encValue: string;
+  let encPrefix: string;
+  if (encryptionKey === undefined) {
+    encValue = base64Encode(enc.encode(payloadJson));
+    encPrefix = "base64";
+  } else {
+    const { nonce, ciphertextAndTag } = await encryptAesGcm(enc.encode(payloadJson), encryptionKey);
+    encValue = `${base64Encode(nonce)}.${base64Encode(ciphertextAndTag)}`;
+    encPrefix = "aes-256-gcm";
+  }
+  const sig = base64Encode(ed25519.sign(enc.encode(encValue), signingSecretKey));
+  const certJson = JSON.stringify({ enc: encValue, sig, alg: `${encPrefix}+ed25519+v2` });
+  const pemBody = base64Encode(enc.encode(certJson));
+  return `-----BEGIN MACHINE FILE-----\n${pemBody}\n-----END MACHINE FILE-----`;
+}
+
+/** The representative license payload with a chosen `kid` claim. */
+export function licensePayloadJsonWithKid(kid: string): string {
+  const parsed = JSON.parse(representativeLicensePayloadJson()) as { meta: Record<string, unknown> };
+  parsed.meta.kid = kid;
+  return JSON.stringify(parsed);
+}
+
+/** The representative machine payload with a chosen `kid` claim. */
+export function machinePayloadJsonWithKid(kid: string): string {
+  const parsed = JSON.parse(representativeMachinePayloadJson()) as { meta: Record<string, unknown> };
+  parsed.meta.kid = kid;
+  return JSON.stringify(parsed);
+}

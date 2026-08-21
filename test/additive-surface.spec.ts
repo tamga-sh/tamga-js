@@ -18,6 +18,23 @@ import { TamgaClient } from "../src/client.js";
 import type { CreateMachineOptions } from "../src/client.js";
 import type { LicenseScope } from "../src/models/license.js";
 import type { ValidationResult } from "../src/models/validation.js";
+import { verifyAndDecryptLicenseFile, verifyLicenseFileWithClaims } from "../src/checkout/licenseFile.js";
+import type { VerifiedLicenseFile } from "../src/checkout/licenseFile.js";
+import { verifyAndDecryptMachineFile, verifyMachineFileWithClaims } from "../src/checkout/machineFile.js";
+import type { VerifiedMachineFile } from "../src/checkout/machineFile.js";
+import type { License } from "../src/models/license.js";
+import type { Machine } from "../src/models/machine.js";
+import type { LicenseScheme } from "../src/models/policy.js";
+import type { RequestOptions } from "../src/transport.js";
+import { canonicalFingerprintString, computeFingerprint } from "../src/fingerprint.js";
+import {
+  CheckoutError,
+  FingerprintError,
+  ProofError,
+  SigningKeyError,
+  TamgaError,
+} from "../src/errors.js";
+import { verifyOfflineProof } from "../src/proof.js";
 
 /** `activateMachine` exactly as it was declared before this change. */
 type PreviousActivateMachine = (
@@ -102,5 +119,153 @@ describe("the changed declarations remain backward compatible", () => {
     for (const name of previous) {
       expect(typeof client[name]).toBe("function");
     }
+  });
+});
+
+/**
+ * The signing-key-rotation change (`fix/signing-key-rotation`) is additive: it
+ * adds key-set-aware entry points beside the single-key ones rather than
+ * changing them. The four pre-existing verification signatures are re-declared
+ * here exactly as they shipped, so a change to any of them fails `tsc`.
+ *
+ * The generated `dist/index.d.ts` was also diffed against the base branch's:
+ * zero exported names removed, and the only textual difference in the whole
+ * file is the final `export { ... }` manifest gaining the new names. That diff
+ * is the check that catches a *removal*; this file catches a *reshaping*.
+ */
+type PreviousVerifyAndDecryptLicenseFile = (
+  pem: string,
+  ed25519PublicKey: Uint8Array,
+  licenseKey?: string,
+  now?: number,
+) => Promise<License>;
+
+type PreviousVerifyLicenseFileWithClaims = (
+  pem: string,
+  ed25519PublicKey: Uint8Array,
+  licenseKey?: string,
+  now?: number,
+) => Promise<VerifiedLicenseFile>;
+
+type PreviousVerifyAndDecryptMachineFile = (
+  pem: string,
+  scheme: LicenseScheme,
+  publicKey: Uint8Array,
+  keyMaterial?: { licenseKey: string; fingerprint: string },
+  now?: number,
+) => Promise<Machine>;
+
+type PreviousVerifyMachineFileWithClaims = (
+  pem: string,
+  scheme: LicenseScheme,
+  publicKey: Uint8Array,
+  keyMaterial?: { licenseKey: string; fingerprint: string },
+  now?: number,
+) => Promise<VerifiedMachineFile>;
+
+describe("the offline verification surface only grew", () => {
+  it("every single-key entry point still satisfies its previous signature", () => {
+    const a: PreviousVerifyAndDecryptLicenseFile = verifyAndDecryptLicenseFile;
+    const b: PreviousVerifyLicenseFileWithClaims = verifyLicenseFileWithClaims;
+    const c: PreviousVerifyAndDecryptMachineFile = verifyAndDecryptMachineFile;
+    const d: PreviousVerifyMachineFileWithClaims = verifyMachineFileWithClaims;
+
+    for (const fn of [a, b, c, d]) expect(typeof fn).toBe("function");
+  });
+
+  it("the new client methods sit beside the previous ones, not in place of them", () => {
+    const client = new TamgaClient({ accountId: "acct_1", baseUrl: "https://api.tamga.sh" });
+
+    expect(typeof client.listSigningKeys).toBe("function");
+    expect(typeof client.getSigningKeySet).toBe("function");
+    // ...and the checkout methods a caller already had are untouched.
+    expect(typeof client.checkOutLicense).toBe("function");
+    expect(typeof client.checkOutMachine).toBe("function");
+  });
+});
+
+/**
+ * The artifact read/download change (M25) is additive in the same way: three
+ * new client methods, one new model module, and one new **optional** property
+ * on the transport's `RequestOptions`. The optionality is the load-bearing part
+ * — every existing call site constructs a `RequestOptions` without `redirect`,
+ * so a required field there would break all of them at once.
+ */
+type PreviousRequestOptions = {
+  method: string;
+  path: string;
+  body?: unknown;
+  query?: Record<string, string | number | boolean | undefined>;
+};
+
+describe("the artifact surface only grew", () => {
+  it("a RequestOptions built the previous way is still a RequestOptions", () => {
+    const previous: PreviousRequestOptions = { method: "GET", path: "/licenses/lic-1" };
+    // Assignable only because `redirect` is optional.
+    const current: RequestOptions = previous;
+    expect(current.redirect).toBeUndefined();
+  });
+
+  it("the new artifact methods sit beside the release ones, not in place of them", () => {
+    const client = new TamgaClient({ accountId: "acct_1", baseUrl: "https://api.tamga.sh" });
+
+    expect(typeof client.listReleaseArtifacts).toBe("function");
+    expect(typeof client.getArtifact).toBe("function");
+    expect(typeof client.getArtifactDownloadUrl).toBe("function");
+    // ...and the auto-update check a caller already had is untouched.
+    expect(typeof client.checkForUpgrade).toBe("function");
+  });
+});
+
+/**
+ * Fingerprint canonicalisation is new surface with no previous shape to
+ * preserve — a new module, a new error class with its own closed `kind` union,
+ * and no change to any existing declaration. The one thing worth asserting is
+ * that it did **not** reshape the error model: `FingerprintError` is a sibling
+ * of the existing error classes rather than a new member of any union they
+ * already form, so an exhaustive `switch` over an existing error's `kind` still
+ * type-checks unchanged.
+ */
+describe("the fingerprint surface only grew", () => {
+  it("adds a sibling error class, not a member of an existing kind union", () => {
+    const error = new FingerprintError("boom", "invalid-label", "a=b");
+
+    expect(error).toBeInstanceOf(TamgaError);
+    expect(error).not.toBeInstanceOf(CheckoutError);
+    expect(error).not.toBeInstanceOf(SigningKeyError);
+    expect(error).not.toBeInstanceOf(ProofError);
+  });
+
+  it("leaves an exhaustive switch over CheckoutError.kind exhaustive", () => {
+    // The compile-time half: a `never` default still type-checks, so no
+    // consumer's exhaustive match was widened by this change.
+    const describeKind = (kind: CheckoutError["kind"]): string => {
+      switch (kind) {
+        case "malformed-pem":
+        case "invalid-base64":
+        case "invalid-json":
+        case "unsupported-algorithm":
+        case "license-key-missing":
+        case "fingerprint-missing":
+        case "scheme-not-supported":
+        case "ttl-out-of-range":
+        case "expired":
+        case "crypto":
+          return kind;
+        default: {
+          const exhaustive: never = kind;
+          return exhaustive;
+        }
+      }
+    };
+
+    expect(describeKind("crypto")).toBe("crypto");
+  });
+
+  it("exposes the two fingerprint entry points beside the existing primitives", () => {
+    expect(typeof computeFingerprint).toBe("function");
+    expect(typeof canonicalFingerprintString).toBe("function");
+    // ...and the offline primitives a caller already had are untouched.
+    expect(typeof verifyOfflineProof).toBe("function");
   });
 });

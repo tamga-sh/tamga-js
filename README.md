@@ -95,6 +95,9 @@ method sends whatever `auth` transport was configured.
 | `getEntitlement(licenseId, entitlementId)` | `GET /licenses/{id}/entitlements/{entitlementId}` |
 | `hasEntitlement(licenseId, code, limit?)` | convenience wrapper around `listEntitlements` |
 | `checkForUpgrade(opts)` | `GET /releases/actions/upgrade` |
+| `listReleaseArtifacts(releaseId, { limit?, after? })` | `GET /releases/{id}/artifacts` |
+| `getArtifact(artifactId)` | `GET /artifacts/{id}` |
+| `getArtifactDownloadUrl(artifactId, { ttlSeconds? })` | `GET /artifacts/{id}/actions/download` (presigned URL, never followed) |
 | `health()` | `GET /v1/health` (not account-scoped) |
 | `dispose()` | stops every timer this client started |
 
@@ -195,7 +198,11 @@ in your application, so they work in air-gapped environments.
 | `verifyLicenseFileWithClaims(pem, ed25519PublicKey, licenseKey?, now?)` | The same, also returning the signed `iat`/`exp`/`jti`/`kid` |
 | `verifyAndDecryptMachineFile(pem, scheme, publicKey, keyMaterial?, now?)` | Verify, decrypt and expiry-check a `.mach` file (multi-scheme) |
 | `verifyMachineFileWithClaims(pem, scheme, publicKey, keyMaterial?, now?)` | The same, also returning the signed `iat`/`exp`/`jti`/`kid` |
+| `verifyLicenseFileWithKeySet(pem, keySet, licenseKey?, now?)` | Verify a `.lic` file against the signing key its `kid` names — survives a key rotation |
+| `verifyMachineFileWithKeySet(pem, keySet, keyMaterial?, now?)` | The same for an Ed25519-signed `.mach` file |
 | `verifyOfflineProof(proof, accountId, machineId, fingerprint, dataset, rsaPublicKey)` | Verify a `"v1x0."` offline proof token |
+| `computeFingerprint(components)` | Canonicalise labelled components into a stable machine fingerprint |
+| `canonicalFingerprintString(components)` | The string `computeFingerprint` hashes — for debugging a cross-SDK disagreement |
 
 ```ts
 import { TamgaClient, CheckoutError, verifyAndDecryptLicenseFile } from "@tamga/sdk";
@@ -251,6 +258,93 @@ A machine file carries the same signed `meta.exp` a license file does, and it is
 enforced here too, so pass a trusted timestamp as the fifth argument (`now`)
 when the local clock cannot be trusted.
 
+### Surviving a signing-key rotation
+
+Verifying against a single embedded key has one failure mode worth designing
+around: when the account rotates its Ed25519 signing key, every file signed
+*before* the rotation stops verifying — and it fails with exactly the error a
+forged file produces. The file is authentic and the license may well still be
+valid, so a paying customer gets locked out and the error points support at
+tampering rather than at a stale key.
+
+Both file formats have always carried a `kid` claim naming the key that signed
+them. Verify through a `SigningKeySet` and the two outcomes separate:
+
+```ts
+import {
+  SigningKeySet,
+  SigningKeyError,
+  CheckoutError,
+  verifyLicenseFileWithKeySet,
+} from "@tamga/sdk";
+
+declare const pem: string;
+
+// Every public key your account has ever signed with, standard base64 of the
+// raw 32 bytes — the newest first, the retired ones after it. Pinned in the
+// binary, so this stays fully offline.
+const keySet = SigningKeySet.fromPublicKeys([
+  "<current key>",
+  "<key retired at the last rotation>",
+]);
+
+try {
+  const { license, claims } = await verifyLicenseFileWithKeySet(pem, keySet);
+  console.log(`Verified offline: ${license.id}, signed by key ${claims.kid}`);
+} catch (error) {
+  if (error instanceof SigningKeyError) {
+    // The file names a key you do not have. Almost always a key set that
+    // predates a rotation — refresh it or ship an update. Do NOT accuse the
+    // file, and do not lock the customer out over it.
+    console.warn(`${error.message} (set holds: ${keySet.keyIds.join(", ")})`);
+  } else if (error instanceof CheckoutError && error.kind === "crypto") {
+    // The file names a key you DO have, and the signature still failed.
+    // This one is a forgery.
+    throw error;
+  } else {
+    throw error;
+  }
+}
+```
+
+If the application can reach the API with an account-level credential, fetch the
+set instead of pinning it — one call, cacheable for the life of the process,
+since a rotation *adds* a key rather than invalidating the ones already there:
+
+```ts
+const keySet = await client.getSigningKeySet();
+```
+
+⚠️ `GET /signing-keys` is gated on `account.read`, which the license-key role
+does **not** hold, so `listSigningKeys()`/`getSigningKeySet()` answer `403` for
+an `Authorization: License <key>` client no matter how the account is
+configured. Fetch the set with a back-office token and ship the public keys with
+your application, or have your own backend proxy the call.
+
+Three things about this are deliberate and worth knowing before you build on it:
+
+- **Retired keys belong in the set.** Filtering down to the active key
+  reintroduces the very problem this solves.
+- **There is no "try every key" fallback.** The `kid` selects one key and only
+  that key is used. Trying them all would verify the same files while collapsing
+  "stale key set" and "forgery" back into one indistinguishable error.
+- **`SigningKeyError` has a third kind, `"no-published-signing-key"`.** The
+  server signs with `ed25519_public_key.unwrap_or_default()`, so an account whose
+  key was never published signs every file with the `kid` of the empty string.
+  No client-side action fixes that one, which is why it is not reported as a
+  merely stale key set.
+
+`signingKeyId(publicKeyBase64)` computes the `kid` for a key you hold. ⚠️ It
+hashes the **base64 string** the server publishes, not the 32 decoded bytes —
+pass the string exactly as it appears in `attributes.publicKey`.
+
+`verifyMachineFileWithKeySet` covers Ed25519-signed machine files only and
+refuses the other three schemes outright. `GET /signing-keys` publishes Ed25519
+keys and nothing else, so no set built from it could hold a key that verifies an
+RSA or ECDSA signature. Verify those with `verifyAndDecryptMachineFile` and the
+license's own `scheme`, and accept that a rotation is not a distinguishable
+outcome for them.
+
 > **Compatibility warning — offline license *and machine* files must be format
 > v2.** `alg` must end in `+v2` and the signed payload must carry its `meta`
 > claims; a file issued under v1 is **rejected outright, with no fallback path**
@@ -258,6 +352,66 @@ when the local clock cannot be trusted.
 > `src/checkout/machineFile.ts::verifyMachineFileWithClaims`). This is a real
 > behavioural break for any caller still holding a v1-issued file: re-run
 > checkout to obtain a v2 file.
+
+## Fingerprint canonicalisation
+
+A machine's `fingerprint` is what a seat is counted against, and the server
+stores it as `fingerprint TEXT NOT NULL` — no length limit, no `CHECK`, no
+normalisation, unique per `(license_id, fingerprint)`. Every Tamga SDK sent
+whatever string the caller supplied, byte for byte. So `"ABC-123"`, `"abc-123"`
+and `" ABC-123 "` were three machines holding three seats, and the third is the
+common case: a value read from a file, a command's stdout or an environment
+variable, carrying a trailing newline nobody sees.
+
+`computeFingerprint` is a pure function that turns caller-chosen labelled
+components into one stable string.
+
+```ts
+import { computeFingerprint } from "@tamga/sdk";
+
+const fingerprint = computeFingerprint([
+  { label: "machine-id", value: machineId },
+  { label: "disk", value: diskSerial },
+]);
+
+await client.activateMachine(licenseId, fingerprint);
+```
+
+**It reads no hardware identifiers, and that is deliberate.** What identifies a
+machine is a product decision, not a library's: a cloned VM template shares its
+identifiers, a container has none, a replaced motherboard changes them, and in a
+browser there is nothing sane to read at all. No default is right for both a
+desktop application and a Kubernetes sidecar, and a wrong default here spends
+your customers' seats. You choose the components; this makes the choice stable.
+
+Three properties, each pinned by a pair of shared cross-SDK vectors:
+
+- **Order does not matter.** The components are sorted, so the order you pass
+  them in is your convenience, not part of the machine's identity.
+- **Surrounding ASCII whitespace does not matter.** It is trimmed from values
+  before hashing — the trailing-newline footgun above.
+- **Case does matter.** Case folding is absent on purpose: lowercasing a base64
+  or hex identifier corrupts it.
+
+**Values are not Unicode-normalised.** JavaScript has
+`String.prototype.normalize`, so this is the one SDK where adding NFC would look
+free — which is exactly why it is not there. NFC needs a new dependency in the
+Rust and Go SDKs and either ICU or hand-rolled Unicode tables in the C11 one. A
+rule the eight ports cannot implement identically would produce two fingerprints
+for one machine depending on which SDK an application was written with, and
+quietly consume two seats. If your values can arrive in more than one normal
+form, normalise them yourself before calling.
+
+Invalid input **throws** `FingerprintError` rather than being repaired: an empty
+component list, an empty or non-ASCII label, a label containing `=`, a duplicate
+label, or a value that still holds an ASCII control character after trimming.
+Repairing any of these would map two genuinely different inputs onto one
+fingerprint — that is, onto one seat — which is the bug this exists to close.
+Match on `error.kind`.
+
+Pick your components once and keep them stable for the life of an installation:
+changing the set changes the fingerprint, and a changed fingerprint is a new
+machine holding a new seat.
 
 ## Security notes
 
@@ -370,8 +524,30 @@ Things this SDK deliberately does not do, or cannot do yet.
   **required by this SDK**, because omitting it drops the channel predicate
   entirely and lets alpha and dev builds answer a production updater.
 
-  Artifact download is still not modelled — the route exists but is walled off
-  by a permission the license-key role does not hold.
+  The artifact bytes behind a release **are** now modelled —
+  `listReleaseArtifacts`, `getArtifact` and `getArtifactDownloadUrl`. They were
+  excluded while `artifact.download` sat in no role's permission set: the
+  license-key role has always held `artifact.read`, so listing and showing an
+  artifact were reachable all along, but metadata you cannot act on is not worth
+  a surface. The server now grants that role `artifact.download` too, so an
+  embedded updater can resolve its own build and the read routes finally have a
+  point. Create, update, delete and upload are still out — those verbs are not
+  in that role's set, so nothing this SDK could send would be authorized.
+
+  `getArtifactDownloadUrl` hands back a short-lived presigned URL rather than
+  the bytes, and that is deliberate. Fetch it yourself with a plain
+  `fetch(url)` and **no credentials** — it points at an object store, not at the
+  Tamga API. The route's default answer is a `303` at that URL, and `fetch`
+  follows redirects; the Fetch standard only strips `Authorization` across an
+  *origin* boundary, so a deployment serving object storage from the API's own
+  origin would otherwise receive your licence key. This SDK sends
+  `?redirect=false` and pins the request to `redirect: "manual"` so neither can
+  happen.
+
+  A `403` from the download action is not necessarily a permission problem: the
+  handler enforces the owning release's read gate too — distribution strategy,
+  suspension, expiry, entitlement — so a `CLOSED` release refuses its binary
+  even to a caller that does hold `artifact.download`.
 - **A license key is not confined to its own license on the read routes.** The
   server's `require_license_scope` guard — which stops a license-key credential
   naming a different license — is called by `validate`, `validate-key` and
