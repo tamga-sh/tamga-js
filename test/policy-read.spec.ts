@@ -7,17 +7,20 @@
  * 1. **Which policy route an embedded client can use.** `GET /policies/{id}`
  *    needs `policy.read`, which the license-key role does not hold;
  *    `GET /licenses/{id}/policy` needs only `license.read`, which it does.
- * 2. **That an unrecognised `check_in_interval` degrades.** The wire values the
- *    server accepts are `daily`/`weekly`/`monthly`/`yearly`, which the current
- *    `CheckInInterval` union does not carry. Opening policy deserialization
- *    must not turn that into a failed call.
+ * 2. **That `check_in_interval` decodes the values the server can actually
+ *    store.** The column's `CHECK` constraint admits `daily`/`weekly`/
+ *    `monthly`/`yearly` and nothing else, and `CheckInInterval` now says the
+ *    same. An unrecognised value still has to degrade rather than take the
+ *    call down — TypeScript validates nothing at runtime and this SDK adds no
+ *    runtime guard, which is the property that makes a future server-side
+ *    vocabulary change survivable.
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { TamgaClient, MAX_PAGE_SIZE } from "../src/client.js";
 import { effectiveHeartbeatWindowMs } from "../src/models/policy.js";
-import type { Policy } from "../src/models/policy.js";
+import type { CheckInInterval, Policy } from "../src/models/policy.js";
 import {
   heartbeatWindowMsFromMachine,
   MACHINE_HEARTBEAT_INTERVAL_DIVISOR,
@@ -89,18 +92,33 @@ describe("license and policy reads", () => {
     expect(lastCall(fetchMock)[0].pathname).toBe("/v1/accounts/acct_1/policies/pol-1");
   });
 
-  it("decodes a policy carrying a check_in_interval the union does not know", async () => {
-    // The server's own allowlist is daily/weekly/monthly/yearly; the union here
-    // still says day/week/month/year. Correcting the union is a separate
-    // change — what must hold now is that the mismatch degrades to a value the
-    // caller can inspect rather than taking the whole call down.
+  // The four values the column's CHECK constraint admits, and the only four
+  // `enums::CHECK_IN_INTERVALS` lists. Each must survive a read verbatim and
+  // typecheck against `CheckInInterval` — this array is annotated, so the noun
+  // spellings this union used to carry cannot be reintroduced without failing
+  // `pnpm typecheck`.
+  const STORABLE_INTERVALS: readonly CheckInInterval[] = ["daily", "weekly", "monthly", "yearly"];
+
+  it.each(STORABLE_INTERVALS)("decodes the storable check_in_interval %s verbatim", async (interval) => {
     mockJsonApiResponse(
-      policy({ name: "Pro", require_check_in: true, check_in_interval: "daily", check_in_interval_count: 2 }),
+      policy({ name: "Pro", require_check_in: true, check_in_interval: interval, check_in_interval_count: 2 }),
     );
 
     const result = await client().getPolicy("pol-1");
-    expect(result.attributes.check_in_interval).toBe("daily");
+    expect(result.attributes.check_in_interval).toBe(interval);
     expect(result.attributes.check_in_interval_count).toBe(2);
+  });
+
+  it("degrades rather than rejects on a check_in_interval outside the union", async () => {
+    // No runtime guard sits between the wire and the caller, so a value the
+    // union does not carry still arrives intact instead of failing the read.
+    // That is what kept `getPolicy` working through the whole period when the
+    // union spelled these `day`/`week`/`month`/`year` and the server spelled
+    // them `daily`/…, and it is what would absorb the next vocabulary change.
+    mockJsonApiResponse(policy({ name: "Pro", require_check_in: true, check_in_interval: "fortnightly" }));
+
+    const result = await client().getPolicy("pol-1");
+    expect(result.attributes.check_in_interval).toBe("fortnightly");
   });
 
   it("decodes a policy whose strategy fields carry the server's bogus defaults", async () => {

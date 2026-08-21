@@ -400,7 +400,20 @@ Things this SDK deliberately does not do, or cannot do yet.
 - **`policy.max_memory` and `policy.max_disk` are omitted from the `GET`
   response** even though both are enforced during validation, so `getPolicy` /
   `getLicensePolicy` cannot introspect those two limits — you only observe
-  `TOO_MUCH_MEMORY` / `TOO_MUCH_DISK` on a failed validation.
+  `TOO_MUCH_MEMORY` / `TOO_MUCH_DISK` on a failed validation, or
+  `MEMORY_LIMIT_EXCEEDED` / `DISK_LIMIT_EXCEEDED` on a refused machine create.
+  `PolicyAttributes` therefore does not declare them; it dropped the two
+  never-populated properties in 0.4.0.
+- **`policy.check_in_interval` is `daily` / `weekly` / `monthly` / `yearly`,
+  and the server does not act on any of them.** The column's own `CHECK`
+  constraint admits nothing else, so those four are what a policy read
+  carries — `CheckInInterval` was corrected to them in 0.4.0, from the noun
+  spellings (`day` / `week` / …) it previously and wrongly declared. Separately
+  and not fixable here, the server's overdue calculation matches on those same
+  noun spellings, so every configured cadence falls through its 30-day default
+  branch and `check_in_interval_count` is discarded with it. Read
+  `require_check_in` to decide whether to call `checkIn` at all; treat the
+  cadence as configuration rather than as a deadline.
 - **`GET /licenses/{id}/entitlements` cannot be paginated.** The listing is a
   union of the license's direct entitlements and the ones inherited from its
   policy, so no single keyset cursor describes it and the server ignores

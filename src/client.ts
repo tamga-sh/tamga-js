@@ -611,9 +611,11 @@ export class TamgaClient {
    * `heartbeat_duration` (the real machine heartbeat window — see
    * {@link resolveHeartbeatWindowMs}), `require_heartbeat` (whether missing it
    * can ever cull the machine), `require_check_in` and `check_in_interval`
-   * (whether {@link checkIn} is even expected), `overage_strategy` (which of
-   * the two limit vocabularies {@link activateMachine} will hit), and `scheme`
-   * (which signature to verify a checked-out file against).
+   * (whether {@link checkIn} is even expected — the flag answers that; the
+   * cadence is configuration the server currently fails to honour, see
+   * {@link import("./models/policy.js").CheckInInterval}), `overage_strategy`
+   * (which of the two limit vocabularies {@link activateMachine} will hit),
+   * and `scheme` (which signature to verify a checked-out file against).
    *
    * ⚠️ Shares {@link getLicense}'s missing `require_license_scope` check — a
    * license key can read any license's policy in the account.
@@ -638,8 +640,10 @@ export class TamgaClient {
    * is for backends holding an account-level token.
    *
    * ⚠️ `max_memory` and `max_disk` are **absent** from the response even though
-   * both are enforced during validation — see
-   * {@link import("./models/policy.js").PolicyAttributes}.
+   * both are enforced during validation, so
+   * {@link import("./models/policy.js").PolicyAttributes} does not declare
+   * them — the two limits are observable only from a failed validation or a
+   * refused machine create, never from a policy read.
    */
   async getPolicy(policyId: string): Promise<Policy> {
     const { data } = await sendJsonApi<Policy>(this.transport, {

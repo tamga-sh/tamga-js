@@ -145,12 +145,33 @@ export function resolveHeartbeatResurrectionStrategy(raw: string): HeartbeatResu
 }
 
 /**
- * Check-in cadence unit. ⚠️ Wire values are **lowercase**
- * (`"day"`/`"week"`/`"month"`/`"year"`) — inconsistent with the
+ * Check-in cadence unit. ⚠️ Wire values are lowercase **adverbs** —
+ * `"daily"`/`"weekly"`/`"monthly"`/`"yearly"` — inconsistent with the
  * `SCREAMING_SNAKE_CASE` convention every other enum on this resource uses.
  * Preserved as-is, not normalized.
+ *
+ * Unlike `overage_strategy` and `heartbeat_resurrection_strategy`, this one
+ * needs no lenient resolver: the column carries its own `CHECK` constraint
+ * (`check_in_interval IS NULL OR check_in_interval IN ('daily', 'weekly',
+ * 'monthly', 'yearly')`) and `policies::enums::CHECK_IN_INTERVALS` repeats it,
+ * so the four values above are the only ones the database can hold.
+ *
+ * > **Corrected in 0.4.0.** This union previously read
+ * > `"day" | "week" | "month" | "year"`, spellings the column rejects, so it
+ * > could not describe any policy that exists. Comparing this field against
+ * > `"day"` is now a compile error — the noun forms were never on the wire.
+ *
+ * ⚠️ **Knowing the cadence does not tell you when the server expects a
+ * check-in.** `validate_license.rs::check_in_interval_days` matches on the
+ * *noun* spellings the column cannot store, so every configured cadence falls
+ * through its `_ => 30` arm: a `"daily"` policy is enforced at thirty days,
+ * and `check_in_interval_count` is discarded on that path rather than
+ * multiplied. Filed upstream as `tamga-api-internal#3`. No SDK can correct it
+ * — read this field as "what the policy was configured to mean", not as the
+ * deadline {@link import("../client.js").TamgaClient.checkIn} is judged
+ * against.
  */
-export type CheckInInterval = "day" | "week" | "month" | "year";
+export type CheckInInterval = "daily" | "weekly" | "monthly" | "yearly";
 
 /**
  * Named recognized values for the free-text `expiration_strategy` policy
@@ -218,11 +239,24 @@ export interface Policy {
 /**
  * Attributes of a {@link Policy}.
  *
- * ⚠️ The `GET` response **omits `max_memory` and `max_disk`** even though
- * both are enforced during validation — this SDK cannot introspect these
- * two limits client-side, only observe `TOO_MUCH_MEMORY`/`TOO_MUCH_DISK` on
- * a failed validation. Modeled as optional (`undefined` when absent, per
- * the server's actual field omission) rather than `null`.
+ * Field-for-field with the server's own `PolicyAttributes` serializer
+ * (`tamga-api/src/features/policies/serializer.rs:22-52`), which is the only
+ * thing that decides what a policy read carries.
+ *
+ * ⚠️ **`max_memory` and `max_disk` are deliberately not modeled.** Both exist
+ * on the server's `Policy` model and both are enforced during validation
+ * (`policies/model.rs:187-188`, `:302`, `:309`), but the serializer never
+ * emits them — it emits `max_machines`, `max_cores`, `max_uses`,
+ * `max_processes` and `max_users` and stops. They are settable through the
+ * policy create/update request bodies, which this SDK does not expose, and
+ * unreadable through every route it does. So the two limits are observable
+ * only as `TOO_MUCH_MEMORY`/`TOO_MUCH_DISK` on a failed validation, or as
+ * `MEMORY_LIMIT_EXCEEDED`/`DISK_LIMIT_EXCEEDED` on a refused machine create.
+ *
+ * > **Changed in 0.4.0.** Both were previously declared here as optional
+ * > properties documented as "always `undefined`". Nothing could ever
+ * > populate them, so the declarations only invited callers to branch on a
+ * > value that never arrives; reading either is now a compile error.
  */
 export interface PolicyAttributes {
   /** The product this policy belongs to. */
@@ -247,7 +281,12 @@ export interface PolicyAttributes {
   require_check_in: boolean;
   /** Check-in cadence unit — see {@link CheckInInterval}. */
   check_in_interval: CheckInInterval | null;
-  /** Check-in cadence multiplier (e.g. `2` + `"week"` = every 2 weeks). */
+  /**
+   * Check-in cadence multiplier — `2` + `"weekly"` reads as "every 2 weeks".
+   * ⚠️ Server-side this multiplier is currently dead: the arm that would
+   * apply it never matches, so the fallback discards it. See
+   * {@link CheckInInterval}.
+   */
   check_in_interval_count: number | null;
   /**
    * Whether machines under this policy must send heartbeats. **Defaults to
@@ -316,16 +355,6 @@ export interface PolicyAttributes {
   max_machines: number | null;
   /** Total CPU core limit across machines, if set. */
   max_cores: number | null;
-  /**
-   * ⚠️ Enforced during validation but **omitted from the `GET` response** —
-   * expect this to always be `undefined` from the server today.
-   */
-  max_memory?: number | null;
-  /**
-   * ⚠️ Enforced during validation but **omitted from the `GET` response** —
-   * expect this to always be `undefined` from the server today.
-   */
-  max_disk?: number | null;
   /** Total process limit across machines, if set. */
   max_processes: number | null;
   /** Use-count limit, if set (compared with strict `>=`, ignoring `overage_strategy`). */

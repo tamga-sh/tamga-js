@@ -7,7 +7,65 @@ import {
   RenewalBasis,
   AuthenticationStrategy,
   type Policy,
+  type PolicyAttributes,
 } from "../src/models/policy.js";
+
+/**
+ * Every attribute the server's own policy serializer emits, in its declaration
+ * order (`tamga-api/src/features/policies/serializer.rs:22-52`). Transcribed
+ * from the serializer, not from this SDK's interface — the serializer is the
+ * only thing that decides what a policy read carries.
+ *
+ * ⚠️ `max_memory` and `max_disk` are absent on purpose. Both exist on the
+ * server's `Policy` model (`policies/model.rs:187-188`) and both are enforced
+ * during validation (`:302`, `:309`), but the serializer skips straight from
+ * `max_cores` to `max_uses`, so no route this SDK calls can populate them.
+ */
+const SERIALIZED_POLICY_ATTRIBUTES = [
+  "product_id",
+  "name",
+  "duration",
+  "strict",
+  "floating",
+  "scheme",
+  "encrypted",
+  "use_pool",
+  "protected",
+  "require_check_in",
+  "check_in_interval",
+  "check_in_interval_count",
+  "require_heartbeat",
+  "heartbeat_duration",
+  "heartbeat_cull_strategy",
+  "heartbeat_resurrection_strategy",
+  "machine_uniqueness_strategy",
+  "expiration_strategy",
+  "expiration_basis",
+  "renewal_basis",
+  "authentication_strategy",
+  "overage_strategy",
+  "max_machines",
+  "max_cores",
+  "max_uses",
+  "max_processes",
+  "max_users",
+  "metadata",
+  "created",
+  "updated",
+] as const;
+
+type Assert<T extends true> = T;
+type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+
+/**
+ * The real gate on M38, and the one a runtime assertion cannot provide:
+ * re-declaring `max_memory` or `max_disk` on `PolicyAttributes` — or dropping
+ * a field the serializer does emit — fails `pnpm typecheck`. A test that only
+ * inspected an object literal would stay green through either mistake.
+ */
+type _PolicyAttributesMatchSerializer = Assert<
+  Equal<keyof PolicyAttributes, (typeof SERIALIZED_POLICY_ATTRIBUTES)[number]>
+>;
 
 describe("resolveOverageStrategy", () => {
   it("resolves all 5 known wire values", () => {
@@ -122,7 +180,7 @@ describe("Policy", () => {
     );
   });
 
-  it("max_memory/max_disk are absent (undefined) from a representative GET response", () => {
+  it("models exactly the attribute set the server's policy serializer emits", () => {
     const attributes: Policy["attributes"] = {
       product_id: "p",
       name: "n",
@@ -155,7 +213,12 @@ describe("Policy", () => {
       created: "2026-01-01T00:00:00Z",
       updated: "2026-01-01T00:00:00Z",
     };
-    expect(attributes.max_memory).toBeUndefined();
-    expect(attributes.max_disk).toBeUndefined();
+
+    // A complete policy attributes object carries every serialized field and
+    // nothing else. `max_memory`/`max_disk` are the two that used to be here
+    // and are not serialized, so a caller could never have read either.
+    expect(Object.keys(attributes).sort()).toEqual([...SERIALIZED_POLICY_ATTRIBUTES].sort());
+    expect(SERIALIZED_POLICY_ATTRIBUTES).not.toContain("max_memory");
+    expect(SERIALIZED_POLICY_ATTRIBUTES).not.toContain("max_disk");
   });
 });
