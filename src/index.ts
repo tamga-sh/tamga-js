@@ -121,6 +121,7 @@ export {
   CheckoutError,
   SigningKeyError,
   ProofError,
+  FingerprintError,
   parseApiErrors,
   errorFromApiError,
   apiErrorFromResponseBody,
@@ -159,6 +160,13 @@ export type {
 } from "./checkout/machineFile.js";
 
 export { parseProofToken, verifyOfflineProof } from "./proof.js";
+
+export {
+  computeFingerprint,
+  canonicalFingerprintString,
+  FINGERPRINT_DOMAIN,
+} from "./fingerprint.js";
+export type { FingerprintComponent } from "./fingerprint.js";
 
 export { SigningKeySet, isWellFormedKeyId } from "./checkout/keySet.js";
 export type { SigningKeyIdMismatch } from "./checkout/keySet.js";

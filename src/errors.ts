@@ -696,6 +696,93 @@ export class ProofError extends TamgaError {
 }
 
 /**
+ * A set of fingerprint components could not be canonicalised — see
+ * `src/fingerprint.ts`.
+ *
+ * Every one of these is a rejection, never a repair. Canonicalisation exists to
+ * make two spellings of one machine agree on one seat; quietly stripping a
+ * control character or de-duplicating a repeated label would do the opposite,
+ * mapping two genuinely different inputs onto the same seat. So the rule is
+ * that anything the algorithm cannot represent exactly is refused, and the
+ * caller decides what its own identifiers should have been.
+ *
+ * A distinct class rather than a reused one because these are caller-input
+ * bugs found before any network call — nothing about them is retryable, and
+ * nothing about them came from the server.
+ */
+export class FingerprintError extends TamgaError {
+  constructor(
+    message: string,
+    readonly kind:
+      | "no-components"
+      | "empty-label"
+      | "invalid-label"
+      | "duplicate-label"
+      | "invalid-value",
+    /** The offending label, when there is one — verbatim, as the caller passed it. */
+    readonly label?: string,
+  ) {
+    super(message);
+    this.name = "FingerprintError";
+  }
+
+  /** No components at all: there is nothing to identify a machine by. */
+  static noComponents(): FingerprintError {
+    return new FingerprintError(
+      "a fingerprint needs at least one component",
+      "no-components",
+    );
+  }
+
+  static emptyLabel(): FingerprintError {
+    return new FingerprintError(
+      "a fingerprint component label must not be empty",
+      "empty-label",
+      "",
+    );
+  }
+
+  /**
+   * The label is not ASCII printable, or contains `=`.
+   *
+   * Both halves matter. `=` would make the `label=value` split ambiguous, and
+   * it is legal *inside* a value — so the split has to be at the first `=`, and
+   * that is only unambiguous if labels can never contain one. Restricting
+   * labels to ASCII is what keeps them out of the Unicode-normalisation problem
+   * entirely: a label cannot itself need normalising.
+   */
+  static invalidLabel(label: string, detail: string): FingerprintError {
+    return new FingerprintError(
+      `fingerprint component label ${JSON.stringify(label)} is invalid: ${detail}`,
+      "invalid-label",
+      label,
+    );
+  }
+
+  /**
+   * Two components share a label. Not de-duplicated: two values for one label
+   * is a caller bug, and picking one of them hides it behind a fingerprint that
+   * silently depends on argument order.
+   */
+  static duplicateLabel(label: string): FingerprintError {
+    return new FingerprintError(
+      `fingerprint component label ${JSON.stringify(label)} appears more than once`,
+      "duplicate-label",
+      label,
+    );
+  }
+
+  /** The value still holds an ASCII control character after trimming. */
+  static invalidValue(label: string, detail: string): FingerprintError {
+    return new FingerprintError(
+      `fingerprint component ${JSON.stringify(label)} has an invalid value: ${detail}`,
+      "invalid-value",
+      label,
+    );
+  }
+}
+
+/**
  * Parses a non-2xx response body as a JSON:API error document and maps its
  * first error to the most specific {@link TamgaError} subclass. Falls back
  * to a synthetic {@link ApiError} (status only, no server-provided detail)

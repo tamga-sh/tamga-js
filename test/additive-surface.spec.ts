@@ -26,6 +26,15 @@ import type { License } from "../src/models/license.js";
 import type { Machine } from "../src/models/machine.js";
 import type { LicenseScheme } from "../src/models/policy.js";
 import type { RequestOptions } from "../src/transport.js";
+import { canonicalFingerprintString, computeFingerprint } from "../src/fingerprint.js";
+import {
+  CheckoutError,
+  FingerprintError,
+  ProofError,
+  SigningKeyError,
+  TamgaError,
+} from "../src/errors.js";
+import { verifyOfflineProof } from "../src/proof.js";
 
 /** `activateMachine` exactly as it was declared before this change. */
 type PreviousActivateMachine = (
@@ -205,5 +214,58 @@ describe("the artifact surface only grew", () => {
     expect(typeof client.getArtifactDownloadUrl).toBe("function");
     // ...and the auto-update check a caller already had is untouched.
     expect(typeof client.checkForUpgrade).toBe("function");
+  });
+});
+
+/**
+ * Fingerprint canonicalisation is new surface with no previous shape to
+ * preserve — a new module, a new error class with its own closed `kind` union,
+ * and no change to any existing declaration. The one thing worth asserting is
+ * that it did **not** reshape the error model: `FingerprintError` is a sibling
+ * of the existing error classes rather than a new member of any union they
+ * already form, so an exhaustive `switch` over an existing error's `kind` still
+ * type-checks unchanged.
+ */
+describe("the fingerprint surface only grew", () => {
+  it("adds a sibling error class, not a member of an existing kind union", () => {
+    const error = new FingerprintError("boom", "invalid-label", "a=b");
+
+    expect(error).toBeInstanceOf(TamgaError);
+    expect(error).not.toBeInstanceOf(CheckoutError);
+    expect(error).not.toBeInstanceOf(SigningKeyError);
+    expect(error).not.toBeInstanceOf(ProofError);
+  });
+
+  it("leaves an exhaustive switch over CheckoutError.kind exhaustive", () => {
+    // The compile-time half: a `never` default still type-checks, so no
+    // consumer's exhaustive match was widened by this change.
+    const describeKind = (kind: CheckoutError["kind"]): string => {
+      switch (kind) {
+        case "malformed-pem":
+        case "invalid-base64":
+        case "invalid-json":
+        case "unsupported-algorithm":
+        case "license-key-missing":
+        case "fingerprint-missing":
+        case "scheme-not-supported":
+        case "ttl-out-of-range":
+        case "expired":
+        case "crypto":
+          return kind;
+        default: {
+          const exhaustive: never = kind;
+          return exhaustive;
+        }
+      }
+    };
+
+    expect(describeKind("crypto")).toBe("crypto");
+  });
+
+  it("exposes the two fingerprint entry points beside the existing primitives", () => {
+    expect(typeof computeFingerprint).toBe("function");
+    expect(typeof canonicalFingerprintString).toBe("function");
+    // ...and the offline primitives a caller already had are untouched.
+    expect(typeof verifyOfflineProof).toBe("function");
   });
 });

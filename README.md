@@ -95,6 +95,9 @@ method sends whatever `auth` transport was configured.
 | `getEntitlement(licenseId, entitlementId)` | `GET /licenses/{id}/entitlements/{entitlementId}` |
 | `hasEntitlement(licenseId, code, limit?)` | convenience wrapper around `listEntitlements` |
 | `checkForUpgrade(opts)` | `GET /releases/actions/upgrade` |
+| `listReleaseArtifacts(releaseId, { limit?, after? })` | `GET /releases/{id}/artifacts` |
+| `getArtifact(artifactId)` | `GET /artifacts/{id}` |
+| `getArtifactDownloadUrl(artifactId, { ttlSeconds? })` | `GET /artifacts/{id}/actions/download` (presigned URL, never followed) |
 | `health()` | `GET /v1/health` (not account-scoped) |
 | `dispose()` | stops every timer this client started |
 
@@ -198,6 +201,8 @@ in your application, so they work in air-gapped environments.
 | `verifyLicenseFileWithKeySet(pem, keySet, licenseKey?, now?)` | Verify a `.lic` file against the signing key its `kid` names — survives a key rotation |
 | `verifyMachineFileWithKeySet(pem, keySet, keyMaterial?, now?)` | The same for an Ed25519-signed `.mach` file |
 | `verifyOfflineProof(proof, accountId, machineId, fingerprint, dataset, rsaPublicKey)` | Verify a `"v1x0."` offline proof token |
+| `computeFingerprint(components)` | Canonicalise labelled components into a stable machine fingerprint |
+| `canonicalFingerprintString(components)` | The string `computeFingerprint` hashes — for debugging a cross-SDK disagreement |
 
 ```ts
 import { TamgaClient, CheckoutError, verifyAndDecryptLicenseFile } from "@tamga/sdk";
@@ -347,6 +352,66 @@ outcome for them.
 > `src/checkout/machineFile.ts::verifyMachineFileWithClaims`). This is a real
 > behavioural break for any caller still holding a v1-issued file: re-run
 > checkout to obtain a v2 file.
+
+## Fingerprint canonicalisation
+
+A machine's `fingerprint` is what a seat is counted against, and the server
+stores it as `fingerprint TEXT NOT NULL` — no length limit, no `CHECK`, no
+normalisation, unique per `(license_id, fingerprint)`. Every Tamga SDK sent
+whatever string the caller supplied, byte for byte. So `"ABC-123"`, `"abc-123"`
+and `" ABC-123 "` were three machines holding three seats, and the third is the
+common case: a value read from a file, a command's stdout or an environment
+variable, carrying a trailing newline nobody sees.
+
+`computeFingerprint` is a pure function that turns caller-chosen labelled
+components into one stable string.
+
+```ts
+import { computeFingerprint } from "@tamga/sdk";
+
+const fingerprint = computeFingerprint([
+  { label: "machine-id", value: machineId },
+  { label: "disk", value: diskSerial },
+]);
+
+await client.activateMachine(licenseId, fingerprint);
+```
+
+**It reads no hardware identifiers, and that is deliberate.** What identifies a
+machine is a product decision, not a library's: a cloned VM template shares its
+identifiers, a container has none, a replaced motherboard changes them, and in a
+browser there is nothing sane to read at all. No default is right for both a
+desktop application and a Kubernetes sidecar, and a wrong default here spends
+your customers' seats. You choose the components; this makes the choice stable.
+
+Three properties, each pinned by a pair of shared cross-SDK vectors:
+
+- **Order does not matter.** The components are sorted, so the order you pass
+  them in is your convenience, not part of the machine's identity.
+- **Surrounding ASCII whitespace does not matter.** It is trimmed from values
+  before hashing — the trailing-newline footgun above.
+- **Case does matter.** Case folding is absent on purpose: lowercasing a base64
+  or hex identifier corrupts it.
+
+**Values are not Unicode-normalised.** JavaScript has
+`String.prototype.normalize`, so this is the one SDK where adding NFC would look
+free — which is exactly why it is not there. NFC needs a new dependency in the
+Rust and Go SDKs and either ICU or hand-rolled Unicode tables in the C11 one. A
+rule the eight ports cannot implement identically would produce two fingerprints
+for one machine depending on which SDK an application was written with, and
+quietly consume two seats. If your values can arrive in more than one normal
+form, normalise them yourself before calling.
+
+Invalid input **throws** `FingerprintError` rather than being repaired: an empty
+component list, an empty or non-ASCII label, a label containing `=`, a duplicate
+label, or a value that still holds an ASCII control character after trimming.
+Repairing any of these would map two genuinely different inputs onto one
+fingerprint — that is, onto one seat — which is the bug this exists to close.
+Match on `error.kind`.
+
+Pick your components once and keep them stable for the life of an installation:
+changing the set changes the fingerprint, and a changed fingerprint is a new
+machine holding a new seat.
 
 ## Security notes
 
