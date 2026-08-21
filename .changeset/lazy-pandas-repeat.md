@@ -7,9 +7,11 @@ the build a release points at.
 
 They were excluded from every Tamga SDK because `artifact.download` appeared in
 no role's permission set — the licensed client fetching its own update was the
-route's primary caller and it was a flat `403`. The server now grants
-`artifact.read` and `artifact.download` to the licence-key role and gates the
-download on the owning release, so the flow works and is worth modelling.
+route's primary caller and it was a flat `403`. The licence-key role has always
+held `artifact.read`, so listing and showing an artifact were reachable, but
+metadata you cannot act on is not worth a surface. The server now grants that
+role `artifact.download` as well and gates the download on the owning release,
+so the whole flow works and is worth modelling.
 
 **New, and additive — no existing signature, type or error kind changed.**
 

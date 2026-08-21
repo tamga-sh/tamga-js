@@ -97,6 +97,41 @@ function toComponents(pairs: [string, string][]): FingerprintComponent[] {
   return pairs.map(([label, value]) => ({ label, value }));
 }
 
+describe("the fixture is decoded as UTF-8", () => {
+  /**
+   * A sibling port shipped green locally and failed on `windows-latest` only,
+   * because its file read used the platform locale codec (cp1252) and the `é`
+   * in `non_ascii_value` decoded as mojibake — one SDK disagreeing with itself
+   * across two operating systems, which is the failure the shared spec exists
+   * to prevent arriving by a route the spec does not cover.
+   *
+   * Node's `readFileSync` is not locale-dependent, but it only returns a string
+   * at all when handed an encoding, and this repo additionally runs its smoke
+   * job on Deno and Bun. So the decode is asserted rather than assumed, and it
+   * is asserted here — before any digest — so a mis-decode reports its own
+   * cause instead of surfacing as an opaque hash mismatch.
+   *
+   * Every other vector is pure ASCII and would look green through a
+   * mis-decoding reader. This one is the only load-bearing check.
+   */
+  it("reads the non-ASCII vector as the code points it actually contains", () => {
+    const vector = vectorFile.vectors.find((v) => v.name === "non_ascii_value");
+    expect(vector).toBeDefined();
+
+    const value = (vector as Vector).components[0]?.[1];
+    // U+0063 U+0061 U+0066 U+00E9 — four code points, NOT the five a cp1252
+    // decode would produce ("cafÃ©").
+    expect(value).toBe("caf\u00e9");
+    expect(value).toHaveLength(4);
+    expect(value?.codePointAt(3)).toBe(0x00e9);
+  });
+
+  it("round-trips the <US> placeholder to the real separator byte", () => {
+    expect(expand("a<US>b")).toBe(`a${US}b`);
+    expect(US.charCodeAt(0)).toBe(0x1f);
+  });
+});
+
 describe("the shared positive vectors", () => {
   it("covers all nine, so a vector added to the fixture is not silently skipped", () => {
     expect(vectorFile.vectors).toHaveLength(9);
@@ -208,6 +243,36 @@ describe("the JavaScript-specific ways this goes wrong", () => {
     }
 
     expect(compared).toBe(2250);
+  });
+
+  it("sorts on the whole `label=value` component, not on the label alone", () => {
+    // The discriminating shape: one label is a prefix of the other, and the
+    // longer one's next character sorts BELOW '=' (0x3d). Here '-' is 0x2d.
+    //
+    //   whole component : "a-b=y" < "a=x"   ('-' 0x2d < '=' 0x3d)
+    //   label only      : "a"     < "a-b"
+    //
+    // ...so the two orderings are exact reverses of each other, and a port that
+    // sorts by label produces a different fingerprint for the same machine.
+    const canonical = canonicalFingerprintString([
+      { label: "a", value: "x" },
+      { label: "a-b", value: "y" },
+    ]);
+
+    expect(canonical.split(US).slice(1)).toEqual(["a-b=y", "a=x"]);
+  });
+
+  it("sorts case-sensitively, so an uppercase label precedes a lowercase one", () => {
+    // 'B' is 0x42 and 'a' is 0x61, so bytewise "B=2" comes first. A
+    // case-insensitive comparator folds them and puts "a=1" first — the exact
+    // reverse. Case folding anywhere in this algorithm is a defect (it also
+    // corrupts base64 and hex values), and this is the ordering half of it.
+    const canonical = canonicalFingerprintString([
+      { label: "a", value: "1" },
+      { label: "B", value: "2" },
+    ]);
+
+    expect(canonical.split(US).slice(1)).toEqual(["B=2", "a=1"]);
   });
 
   it("still sorts identically to the shared vectors' stated canonical order", () => {

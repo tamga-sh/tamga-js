@@ -18,11 +18,17 @@
  *
  * ## What is reachable with a license key, and what is not
  *
- * `artifact.read` and `artifact.download` are in `Role::LicenseToken`'s default
- * permission set (`tamga-api/src/shared/authz/mod.rs:264-265`), so the three
- * read/download routes this SDK models are callable by an embedded client. The
- * create/update/delete/upload verbs are **not** in that set, so this SDK models
- * no write path for artifacts — nothing it could send would be authorized.
+ * `artifact.read` and `artifact.download` are both in `Role::LicenseToken`'s
+ * default permission set (`tamga-api/src/shared/authz/mod.rs:264-265`), so the
+ * three read/download routes this SDK models are callable by an embedded
+ * client. Only the second of those two is recent: `artifact.read` was always
+ * there, and `tamga-api@e6d317b` added `artifact.download`. So listing and
+ * showing an artifact were reachable before that commit and simply not worth
+ * modelling, because the bytes they describe could not be fetched.
+ *
+ * The create/update/delete/upload verbs are **not** in that set, so this SDK
+ * models no write path for artifacts — nothing it could send would be
+ * authorized.
  */
 
 /** The `artifacts` JSON:API resource: `{ id, type, attributes }`. */

@@ -243,6 +243,23 @@ if (windowMs !== 60_000) {
 const fingerprintVectors = JSON.parse(
   readFileSync(new URL("../test/fixtures/fingerprint/fingerprint.json", import.meta.url), "utf-8"),
 );
+
+// The fixture must decode as UTF-8 on every runtime before any digest is
+// compared. A sibling port shipped green locally and failed on Windows only,
+// because its read used the platform locale codec and the `é` in
+// `non_ascii_value` became mojibake — one SDK disagreeing with itself across two
+// operating systems. Every other vector is pure ASCII and would look green
+// through a mis-decoding reader, so this is the only load-bearing check, and it
+// runs here rather than only under vitest precisely because Deno and Bun are
+// where a decoding difference would actually show up.
+const nonAscii = fingerprintVectors.vectors.find((v) => v.name === "non_ascii_value");
+const nonAsciiValue = nonAscii?.components[0][1];
+if (nonAsciiValue !== "caf\u00e9" || nonAsciiValue.length !== 4) {
+  throw new Error(
+    `smoke test failed: fixture did not decode as UTF-8 — non_ascii_value read as ${JSON.stringify(nonAsciiValue)}`,
+  );
+}
+
 for (const vector of fingerprintVectors.vectors) {
   const components = vector.components.map(([label, value]) => ({ label, value }));
   const actual = computeFingerprint(components);

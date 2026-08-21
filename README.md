@@ -526,11 +526,13 @@ Things this SDK deliberately does not do, or cannot do yet.
 
   The artifact bytes behind a release **are** now modelled —
   `listReleaseArtifacts`, `getArtifact` and `getArtifactDownloadUrl`. They were
-  excluded while `artifact.download` sat in no role's permission set; the server
-  now grants `artifact.read` and `artifact.download` to the license-key role, so
-  an embedded updater can resolve its own build. Create, update, delete and
-  upload are still out — those verbs are not in that set, so nothing this SDK
-  could send would be authorized.
+  excluded while `artifact.download` sat in no role's permission set: the
+  license-key role has always held `artifact.read`, so listing and showing an
+  artifact were reachable all along, but metadata you cannot act on is not worth
+  a surface. The server now grants that role `artifact.download` too, so an
+  embedded updater can resolve its own build and the read routes finally have a
+  point. Create, update, delete and upload are still out — those verbs are not
+  in that role's set, so nothing this SDK could send would be authorized.
 
   `getArtifactDownloadUrl` hands back a short-lived presigned URL rather than
   the bytes, and that is deliberate. Fetch it yourself with a plain
