@@ -4,23 +4,30 @@
  *
  * The heartbeat window is `policy.heartbeat_duration` seconds when that
  * column is set, and 600s (10 min) only when it is null.
- * MACHINE_HEARTBEAT_WINDOW_MS is that fallback and `startHeartbeat` does not
- * adapt on its own, so the 3-minute interval below (a third of the fallback,
- * a safe margin against network jitter) is correct only while
- * `heartbeat_duration` is unset. If your policy sets it, size the interval
- * off the real window instead: check out a machine file and subtract —
- * `next_heartbeat_at - last_heartbeat_at` is the effective window (see
- * `docs/examples/offline-machine-file.ts`, and the caveats on that field:
- * read-backed responses only, needs one prior ping, snapshot from issue
- * time). Out-of-band is the fallback when no machine file is available.
+ * MACHINE_HEARTBEAT_WINDOW_MS is that fallback, and plain `startHeartbeat`
+ * does not adapt on its own — so this example uses
+ * `startHeartbeatFromPolicy`, which reads `GET /licenses/{id}/policy` once at
+ * startup and pings at a third of whatever window that policy actually
+ * imposes. One extra request, and the scheduler stops guessing 600s at a
+ * policy that asked for 60. Sizing against the fallback under a shorter policy
+ * window leaves the machine outside its window between pings, which is what
+ * makes it cullable under `require_heartbeat`.
+ *
+ * Two other ways to reach the same number, when a policy read is not wanted:
+ * `heartbeatWindowMsFromMachine(machine)` on any read-backed machine — one
+ * from `getMachine`, `listMachines`, a checked-out machine file, or
+ * `generateOfflineProof`'s `machine` half — or out of band from whoever
+ * configures the policy. A *ping* response is not one of them: that query
+ * carries no policy join, so its `next_heartbeat_at` is always
+ * `last_heartbeat_at + 600s`.
  *
  * ⚠️ There is deliberately no `case "DEAD"` below, because a *ping* cannot
  * return that status: it writes `last_heartbeat_at = NOW()` and then derives
  * the status from that same timestamp, so it answers ALIVE or RESURRECTED.
  * A branch on DEAD *here* would be dead code. DEAD is reachable elsewhere in
- * this SDK — a checked-out machine file (see
- * `docs/examples/offline-machine-file.ts`) is resolved through a read that
- * joins the policy, so the Machine it yields carries a real staleness
+ * this SDK — `getMachine` and `listMachines`, and a checked-out machine file
+ * (see `docs/examples/offline-machine-file.ts`), all resolve through a read
+ * that joins the policy, so the Machine they yield carries a real staleness
  * verdict — it just never arrives on this route. And even there it would not
  * be a stop condition: it does not mean the machine was culled (culling runs
  * only under `require_heartbeat = true`, which is not the default) and the
@@ -55,7 +62,10 @@ const machine = await client.createMachine(licenseId, fingerprint, {
 
 console.log(`Machine ${machine.id} created, heartbeat_status: ${machine.attributes.heartbeat_status}`);
 
-const stop = client.startHeartbeat(machine.id, MACHINE_HEARTBEAT_WINDOW_MS / 3);
+// Sized off the policy, not off the fallback constant. Falls back to
+// MACHINE_HEARTBEAT_WINDOW_MS / 3 internally when `heartbeat_duration` is
+// null, which is exactly what a hand-written `startHeartbeat` call would do.
+const stop = await client.startHeartbeatFromPolicy(machine.id, licenseId);
 
 // Periodically check status yourself — startHeartbeat only pings, it
 // doesn't surface heartbeat_status transitions on its own, and it swallows
@@ -91,7 +101,12 @@ const statusCheck = setInterval(async () => {
 }, MACHINE_HEARTBEAT_WINDOW_MS);
 
 process.on("SIGINT", () => {
-  stop();
   clearInterval(statusCheck);
+  // `stop()` alone would do here, but `dispose()` is the call that scales:
+  // it clears every timer this client started, so a teardown path does not
+  // have to have kept a handle on each one. A setInterval left running holds
+  // the Node process open.
+  stop();
+  client.dispose();
   process.exit(0);
 });

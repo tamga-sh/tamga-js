@@ -69,32 +69,58 @@ method sends whatever `auth` transport was configured.
 | `checkOutMachine(machineId, { encrypt?, ttl? })` | `GET /machines/{id}/actions/check-out` (raw PEM) |
 | `checkOutMachineJson(machineId, { encrypt?, ttl? })` | `POST /machines/{id}/actions/check-out` (JSON:API resource) |
 | `createMachine(licenseId, fingerprint, opts?)` | `POST /machines` |
-| `activateMachine(licenseId, fingerprint, opts?, scope?, autoDeleteOnOverage?)` | composed: create + validate |
+| `activateMachine(licenseId, fingerprint, opts?, scope?, autoDeleteOnOverage?, reuseExistingMachine?)` | composed: create + validate |
+| `getLicense(licenseId)` | `GET /licenses/{id}` |
+| `getLicensePolicy(licenseId)` | `GET /licenses/{id}/policy` |
+| `getPolicy(policyId)` | `GET /policies/{id}` |
+| `getMachine(machineId)` | `GET /machines/{id}` |
+| `listMachines(opts?)` | `GET /machines` (**offset**-paginated) |
+| `findMachineByFingerprint(licenseId, fingerprint, opts?)` | composed: search + exact re-check |
+| `updateMachine(machineId, attrs)` | `PATCH /machines/{id}` |
 | `pingHeartbeat(machineId)` | `POST /machines/{id}/actions/ping-heartbeat` |
 | `resetHeartbeat(machineId)` | `POST /machines/{id}/actions/reset-heartbeat` |
 | `deleteMachine(machineId)` | `DELETE /machines/{id}` |
 | `startHeartbeat(machineId, intervalMs)` | convenience scheduler around `pingHeartbeat` |
+| `startHeartbeatFromPolicy(machineId, licenseId, opts?)` | `startHeartbeat`, interval read off the policy |
+| `resolveHeartbeatWindowMs(licenseId)` | the policy's real heartbeat window, in ms |
 | `generateOfflineProof(machineId, dataset?)` | `POST /machines/{id}/actions/generate-offline-proof` |
 | `createComponent(machineId, fingerprint, name, metadata?)` | `POST /components` |
 | `listComponents(machineId, { limit?, after? })` | `GET /machines/{id}/components` |
 | `createProcess(machineId, pid, metadata?)` | `POST /processes` |
 | `pingProcess(processId)` | `POST /processes/{id}/actions/ping` |
+| `deleteProcess(processId)` | `DELETE /processes/{id}` |
+| `listMachineProcesses(machineId, { limit?, after? })` | `GET /machines/{id}/processes` |
 | `startProcessHeartbeat(processId, intervalMs?)` | convenience scheduler around `pingProcess` |
 | `listEntitlements(licenseId, { limit?, after? })` | `GET /licenses/{id}/entitlements` |
 | `getEntitlement(licenseId, entitlementId)` | `GET /licenses/{id}/entitlements/{entitlementId}` |
 | `hasEntitlement(licenseId, code, limit?)` | convenience wrapper around `listEntitlements` |
+| `checkForUpgrade(opts)` | `GET /releases/actions/upgrade` |
+| `health()` | `GET /v1/health` (not account-scoped) |
+| `dispose()` | stops every timer this client started |
 
-Five of these need a caveat before you wire them in:
+Several of these need a caveat before you wire them in:
 
 - `quickValidate` does not record the validation when the request carries an
   `Origin` header — which a browser always adds. See **Known gaps**.
 - `resetHeartbeat` and `generateOfflineProof` are role-gated and always `403`
-  for a license-key credential. See **Auth transports**.
+  for a license-key credential. So is `getPolicy`, which needs `policy.read`;
+  use `getLicensePolicy` instead, which needs only `license.read`. See
+  **Auth transports**.
 - `listEntitlements` ignores `after`: that route is not paginable server-side.
-- `createMachine`'s `memory` / `disk` are **megabytes**.
+- **`listMachines` is offset-paginated and every other list here is not.** It
+  takes `page` / `size` and returns `{ items, page: { number, size, total,
+  totalPages } }`; `listComponents` and `listMachineProcesses` take
+  `limit` / `after` and return a bare array. Sending the wrong one is silent in
+  both directions.
+- `createMachine`'s `memory` / `disk` are **megabytes**, and so are
+  `updateMachine`'s — which also cannot clear a field back to `null`.
 - `startHeartbeat` never stops on a `heartbeat_status` value — and a ping
-  cannot report `"DEAD"` in the first place (a checked-out machine file can).
-  See **Known gaps**.
+  cannot report `"DEAD"` in the first place (a machine *read* can). See
+  **Known gaps**.
+- `checkForUpgrade` returning `undefined` does **not** mean you are up to
+  date. See **Known gaps**.
+- `deleteProcess` is not optional housekeeping: nothing server-side reaps a
+  stale process row. See **Known gaps**.
 
 Errors are typed subclasses of `TamgaError` (`NotFoundError`,
 `FingerprintTakenError`, `MachineLimitExceededError`,
@@ -323,11 +349,58 @@ Things this SDK deliberately does not do, or cannot do yet.
   is not plumbed through `TamgaClientConfig`.
 - **`X-RateLimit-*` response headers are unavailable** — no server handler sets
   them, so `Retry-After` on a 429 is the only rate-limit signal to read.
-- **No release / auto-update checking.** Not implemented in any form. (Earlier
-  versions of this note claimed the upgrade endpoint crashed at runtime and
-  that no artifact-download route existed. Both were wrong: the upgrade
-  handler is live and public, and the download route exists. Not shipping a
-  release-check method is a scope decision here, not a server limitation.)
+- **`checkForUpgrade` answering `undefined` does not mean "you are up to
+  date".** `GET /releases/actions/upgrade` returns `204 No Content` in two
+  different situations and will not distinguish them: no release newer than
+  the version you sent exists, *and* a newer release exists that this license
+  is not entitled to (an expired license under a policy that stops delivering
+  new builds at expiry). The collapse is deliberate — a distinct refusal would
+  leak "there is a newer version and you cannot have it", which is exactly what
+  the expiry gate withholds. Word it to users as *no update is available to
+  you*, never as *you are on the latest version*: the second is a claim this
+  endpoint cannot support, and it is wrong precisely for the customers whose
+  licence lapsed. A **suspended** licence is the one case that is not
+  collapsed — it answers `403`, which surfaces as `ForbiddenError`.
+
+  Two more traps on this route. Leaving `constraint` unset does not mean "no
+  constraint": the server substitutes a pessimistic `~{major}.{minor}.{patch}`
+  built from the version you sent, so an updater on `1.2.0` will never be
+  offered `1.3.0` and will look indistinguishable from a current client. Pass
+  `"^1.2.0"` for minor upgrades. And `channel` is optional server-side but
+  **required by this SDK**, because omitting it drops the channel predicate
+  entirely and lets alpha and dev builds answer a production updater.
+
+  Artifact download is still not modelled — the route exists but is walled off
+  by a permission the license-key role does not hold.
+- **A license key is not confined to its own license on the read routes.** The
+  server's `require_license_scope` guard — which stops a license-key credential
+  naming a different license — is called by `validate`, `validate-key` and
+  `check-out`, but **not** by `GET /licenses/{id}` or
+  `GET /licenses/{id}/policy`. The license-key role holds `license.read` by
+  default, so a key can read any license in the account through `getLicense`,
+  and `attributes.key` comes back in plaintext. Reported upstream; there is no
+  client-side fix. Do not treat possession of a license key as evidence that
+  its holder can only see that license.
+- **`getPolicy` is unreachable with a license key.** `GET /policies/{id}`
+  requires the `policy.read` permission, which the license-key role's default
+  set does not include, so it answers `403` regardless of the policy's
+  `authentication_strategy`. `getLicensePolicy` reaches the same resource
+  through `GET /licenses/{id}/policy`, which needs only `license.read` — use
+  that from an embedded client.
+- **Nothing server-side reaps a stale process row.** The reaper exists
+  (`find_and_claim_dead_processes` / `process_process_heartbeat`) but the job
+  scheduler never dispatches it — its `dispatch` handles `cull_dead_machines`
+  and has no process arm. A process that stops pinging is therefore not
+  eventually cleaned up: the row persists indefinitely and keeps holding a seat
+  against `policy.max_processes`, which only an explicit `deleteProcess`
+  decrements. An application that registers a process per launch and never
+  deletes one eventually gets `422 TOO_MANY_PROCESSES` on every start, with no
+  client-side recovery beyond enumerating `listMachineProcesses` and deleting.
+  Call `deleteProcess` on shutdown.
+- **`policy.max_memory` and `policy.max_disk` are omitted from the `GET`
+  response** even though both are enforced during validation, so `getPolicy` /
+  `getLicensePolicy` cannot introspect those two limits — you only observe
+  `TOO_MUCH_MEMORY` / `TOO_MUCH_DISK` on a failed validation.
 - **`GET /licenses/{id}/entitlements` cannot be paginated.** The listing is a
   union of the license's direct entitlements and the ones inherited from its
   policy, so no single keyset cursor describes it and the server ignores
@@ -373,9 +446,10 @@ Things this SDK deliberately does not do, or cannot do yet.
   lookup that joins the policy, so the `Machine` returned by
   `verifyAndDecryptMachineFile` carries a genuine staleness verdict that may
   be `DEAD`, and `generateOfflineProof`'s `machine` half is built the same
-  way. (`GET /machines/{id}` would too; this SDK exposes no machine read.) So
-  branch on `DEAD` from a machine file if it is useful — just never from a
-  ping, where it cannot appear. Even from a file it does not mean the row
+  way. `getMachine` and `listMachines` are a third and fourth: both resolve
+  through the same policy-joining lookup, which is what makes `getMachine` the
+  direct way to observe a machine's real staleness. So branch on `DEAD` from a
+  read if it is useful — just never from a ping, where it cannot appear. Even from a file it does not mean the row
   was culled: the cull job runs exclusively for
   policies with `require_heartbeat = true`, which **defaults to `false`**, so
   under a default policy no row is ever culled and a machine stays `DEAD`
@@ -407,14 +481,23 @@ Things this SDK deliberately does not do, or cannot do yet.
   const windowMs = last && next ? Date.parse(next) - Date.parse(last) : undefined;
   ```
 
+  `heartbeatWindowMsFromMachine(machine)` does exactly this, so you need not
+  re-derive it.
+
   Three caveats: a `pingHeartbeat` response does **not** work for this (that
   query carries no policy join, so `next_heartbeat_at` comes back as
   `last_heartbeat_at + 600s` whatever the policy says); both fields are `null`
   until the machine has been pinged once; and the value is a snapshot from the
-  file's issue time. Learn the window out of band, from whoever configures the
-  policy, only when no machine file is available. There is still no `getPolicy`
-  / `getMachine` method here. The 30s **process** window is genuinely hardcoded
-  server-side and needs no such care.
+  file's issue time. `getMachine` is read-backed too and has neither the second
+  nor the third problem beyond the moment you read it.
+
+  When no machine is at hand, ask the policy:
+  `resolveHeartbeatWindowMs(licenseId)` reads
+  `GET /licenses/{id}/policy` and applies the same fallback the server does, and
+  `startHeartbeatFromPolicy(machineId, licenseId)` does that and starts the
+  timer at a third of the result. One extra request at startup, and the
+  scheduler stops guessing 600s at a policy that asked for 60. The 30s
+  **process** window is genuinely hardcoded server-side and needs no such care.
 - **Eight of the 24 `ValidationCode` values are not reachable today.** They are
   modelled for forward-compatibility (`src/models/validation.ts`); do not write
   logic that depends on receiving one. `ENTITLEMENTS_MISSING` and
