@@ -143,3 +143,46 @@ describe("verifyAndDecryptMachineFile — malformed encrypted payload", () => {
     ).rejects.toMatchObject({ kind: "unsupported-algorithm" });
   });
 });
+
+describe("verifyAndDecryptMachineFile — enc separator handling", () => {
+  const ALG = "aes-256-gcm+ed25519+v2";
+  const KEY_MATERIAL = { licenseKey: LICENSE_KEY, fingerprint: FINGERPRINT };
+  const b64 = (bytes: Uint8Array): string => Buffer.from(bytes).toString("base64");
+
+  it("refuses a second . separator instead of decoding past it", async () => {
+    const enc = `${b64(new Uint8Array(12))}.${b64(new Uint8Array(32))}.${b64(new Uint8Array(8))}`;
+    const { publicKey, pem } = await buildSignedMachinePemFromEnc("ED25519_SIGN", enc, ALG);
+    await expect(
+      verifyAndDecryptMachineFile(pem, "ED25519_SIGN", publicKey, KEY_MATERIAL),
+    ).rejects.toMatchObject({ kind: "invalid-base64" });
+  });
+
+  it("refuses junk characters inside either half", async () => {
+    const enc = `${b64(new Uint8Array(12))}.${b64(new Uint8Array(32))}!!`;
+    const { publicKey, pem } = await buildSignedMachinePemFromEnc("ED25519_SIGN", enc, ALG);
+    await expect(
+      verifyAndDecryptMachineFile(pem, "ED25519_SIGN", publicKey, KEY_MATERIAL),
+    ).rejects.toMatchObject({ kind: "invalid-base64" });
+  });
+
+  it("round-trips the real layout, proving the halves are decoded independently", async () => {
+    // The positive control for the two refusals above: same builder, same
+    // scheme, correct `"<nonce_b64>.<cipher_b64>"` shape.
+    const key = hkdfKeyFor(LICENSE_KEY, FINGERPRINT);
+    const { publicKey, pem } = await buildMachinePem(
+      "ED25519_SIGN",
+      representativeMachinePayloadJson(),
+      key,
+    );
+    const cert = JSON.parse(
+      Buffer.from(
+        pem.trim().split("\n")[1] as string,
+        "base64",
+      ).toString("utf8"),
+    ) as { enc: string };
+    expect(cert.enc.split(".")).toHaveLength(2);
+    await expect(
+      verifyAndDecryptMachineFile(pem, "ED25519_SIGN", publicKey, KEY_MATERIAL),
+    ).resolves.toBeDefined();
+  });
+});
