@@ -39,7 +39,13 @@ export type {
   ArtifactDownloadOptions,
 } from "./client.js";
 
-export type { AuthCredentials, BasicAuthForm, TransportConfig, ResponseInfo } from "./transport.js";
+export type {
+  AuthCredentials,
+  BasicAuthForm,
+  TransportConfig,
+  ResponseInfo,
+  RateLimitInfo,
+} from "./transport.js";
 export { sanitizeVersion, DEFAULT_API_VERSION, DEFAULT_TIMEOUT_MS } from "./transport.js";
 
 export type {
