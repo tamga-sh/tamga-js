@@ -39,7 +39,9 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "changeset": "changeset",
-    "release": "changeset publish"
+    "release": "changeset publish",
+    "release:version": "changeset version && node scripts/doc-versions.mjs --write",
+    "doc-versions:check": "node scripts/doc-versions.mjs --check"
   },
   "dependencies": {
     "@noble/curves": "^1.6.0",

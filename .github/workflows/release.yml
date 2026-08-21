@@ -81,6 +81,9 @@ jobs:
           # provenance for trusted-publishing publishes, so no explicit
           # NPM_CONFIG_PROVENANCE is needed either.
           publish: pnpm release
-          version: pnpm changeset version
+          # `changeset version` bumps package.json, then doc-versions rewrites
+          # any annotated version in the docs from it -- both land inside the
+          # Version Packages PR, so the docs are reviewable before they ship.
+          version: pnpm release:version
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
