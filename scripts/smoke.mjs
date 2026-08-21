@@ -16,16 +16,28 @@
  *    the filesystem, which is exactly where the four runtimes diverge —
  *    and the RSA fixtures are the largest files in the set, so a runtime
  *    that reads them short fails here rather than in production.
+ * 3. `computeFingerprint` agrees with the shared cross-SDK vectors on each
+ *    runtime. It is pure JavaScript over `TextEncoder` and `@noble/hashes`,
+ *    which is precisely the kind of code that looks runtime-independent and
+ *    is not: a runtime whose `TextEncoder` differed would produce a different
+ *    fingerprint for the same machine, i.e. a second seat, and nothing else
+ *    in this suite would notice.
  */
 
 import { readFileSync } from "node:fs";
 
 import {
   TamgaClient,
+  SigningKeySet,
   effectiveHeartbeatWindowMs,
   heartbeatWindowMsFromMachine,
+  signingKeyId,
   verifyAndDecryptMachineFile,
   verifyMachineFileWithClaims,
+  verifyMachineFileWithKeySet,
+  computeFingerprint,
+  canonicalFingerprintString,
+  FingerprintError,
   MACHINE_HEARTBEAT_WINDOW_MS,
 } from "../dist/index.js";
 
@@ -121,6 +133,83 @@ for (const name of fixtureNames) {
   }
 }
 
+// ── Signing-key rotation, on real server-produced fixtures ──────────────────
+//
+// The `kid` rule checked against the server's own certificates on every
+// runtime: hashing the manifest's base64 public-key STRING must reproduce the
+// kid the server stamped into the signed payload. This is the one assertion
+// that catches a runtime whose SHA-256 or text encoding differs, and it is
+// checked against values this SDK did not produce.
+
+for (const name of fixtureNames) {
+  const entry = manifest[name];
+  const computed = signingKeyId(entry.public_key_b64);
+  if (computed !== entry.kid) {
+    throw new Error(
+      `smoke test failed: ${name} computed kid ${computed}, server stamped ${entry.kid}`,
+    );
+  }
+}
+
+// A rotation, end to end, against a server-minted Ed25519 file: the key set
+// holds a newer key first and the file's own (older) key second, and the file
+// must still verify — selecting by kid rather than by position or by trying
+// each in turn.
+const ED25519_FIXTURES = fixtureNames.filter((name) => manifest[name].scheme === "Ed25519Sign");
+if (ED25519_FIXTURES.length === 0) {
+  throw new Error("smoke test failed: no Ed25519 machine-file fixture to verify through a key set");
+}
+
+// 32 zero bytes — a well-formed Ed25519 key encoding standing in for the
+// account's post-rotation key. It signs nothing here.
+const ROTATED_IN_KEY_B64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+for (const name of ED25519_FIXTURES) {
+  const entry = manifest[name];
+  const pem = readFileSync(new URL(entry.file, FIXTURE_DIR), "utf8");
+  const keyMaterial =
+    entry.license_key === null
+      ? undefined
+      : { licenseKey: entry.license_key, fingerprint: entry.fingerprint };
+
+  const keySet = SigningKeySet.fromPublicKeys([ROTATED_IN_KEY_B64, entry.public_key_b64]);
+  if (keySet.size !== 2 || !keySet.has(entry.kid)) {
+    throw new Error(`smoke test failed: key set did not index ${name} under ${entry.kid}`);
+  }
+
+  let expired = false;
+  let verified;
+  try {
+    verified = await verifyMachineFileWithKeySet(pem, keySet, keyMaterial, 0);
+  } catch (err) {
+    if (err?.kind !== "expired") throw err;
+    expired = true;
+  }
+  if (expired) {
+    throw new Error(`smoke test failed: ${name} reported expired against a pre-issue clock`);
+  }
+  if (verified?.claims?.kid !== entry.kid) {
+    throw new Error(
+      `smoke test failed: ${name} verified through a key set but reported kid ${verified?.claims?.kid}`,
+    );
+  }
+
+  // ...and a set that predates the rotation must fail distinguishably rather
+  // than reporting the file as forged.
+  const staleSet = SigningKeySet.fromPublicKeys([ROTATED_IN_KEY_B64]);
+  let staleKind;
+  try {
+    await verifyMachineFileWithKeySet(pem, staleSet, keyMaterial, 0);
+  } catch (err) {
+    staleKind = err?.kind;
+  }
+  if (staleKind !== "unknown-key-id") {
+    throw new Error(
+      `smoke test failed: a stale key set reported "${staleKind}", expected "unknown-key-id"`,
+    );
+  }
+}
+
 // ── The heartbeat-window helpers, on every runtime ──────────────────────────
 //
 // Pure functions with no I/O, so a unit test proves the logic — what this
@@ -147,6 +236,58 @@ if (windowMs !== 60_000) {
   throw new Error(`smoke test failed: heartbeatWindowMsFromMachine returned ${windowMs}, expected 60000`);
 }
 
+// Fingerprint canonicalisation, checked against the same shared vectors the
+// vitest suite uses — read from the fixture rather than restated, so the two
+// cannot drift apart. Order-independence and the ASCII-whitespace trim are the
+// two that a `TextEncoder` or string difference would break first.
+const fingerprintVectors = JSON.parse(
+  readFileSync(new URL("../test/fixtures/fingerprint/fingerprint.json", import.meta.url), "utf-8"),
+);
+
+// The fixture must decode as UTF-8 on every runtime before any digest is
+// compared. A sibling port shipped green locally and failed on Windows only,
+// because its read used the platform locale codec and the `é` in
+// `non_ascii_value` became mojibake — one SDK disagreeing with itself across two
+// operating systems. Every other vector is pure ASCII and would look green
+// through a mis-decoding reader, so this is the only load-bearing check, and it
+// runs here rather than only under vitest precisely because Deno and Bun are
+// where a decoding difference would actually show up.
+const nonAscii = fingerprintVectors.vectors.find((v) => v.name === "non_ascii_value");
+const nonAsciiValue = nonAscii?.components[0][1];
+if (nonAsciiValue !== "caf\u00e9" || nonAsciiValue.length !== 4) {
+  throw new Error(
+    `smoke test failed: fixture did not decode as UTF-8 — non_ascii_value read as ${JSON.stringify(nonAsciiValue)}`,
+  );
+}
+
+for (const vector of fingerprintVectors.vectors) {
+  const components = vector.components.map(([label, value]) => ({ label, value }));
+  const actual = computeFingerprint(components);
+  if (actual !== vector.fingerprint) {
+    throw new Error(
+      `smoke test failed: fingerprint vector ${vector.name} produced ${actual}, expected ${vector.fingerprint}`,
+    );
+  }
+}
+if (
+  !canonicalFingerprintString([{ label: "machine-id", value: "abc123" }]).startsWith(
+    "tamga-fingerprint-v1",
+  )
+) {
+  throw new Error("smoke test failed: canonical string lost its domain separator");
+}
+// ...and a rejection must still be a rejection once bundled: a build that
+// tree-shook the validation away would pass every positive vector above.
+let rejected = false;
+try {
+  computeFingerprint([]);
+} catch (error) {
+  rejected = error instanceof FingerprintError;
+}
+if (!rejected) {
+  throw new Error("smoke test failed: an empty component list was not rejected");
+}
+
 // `dispose()` on a client with no timers must be a no-op, not a throw — a
 // teardown path calls it unconditionally.
 client.dispose();
@@ -154,5 +295,5 @@ client.dispose();
 // Not linted by `pnpm lint` (scoped to src/test — see eslint.config.js);
 // console output is fine here, this is a script, not library code.
 console.log(
-  `smoke: dist/index.js loaded, TamgaClient constructed, constructor validation ran, heartbeat-window helpers resolved, and ${fixtureNames.length} server-produced machine files verified OK`,
+  `smoke: dist/index.js loaded, TamgaClient constructed, constructor validation ran, heartbeat-window helpers resolved, ${fixtureNames.length} server-produced machine files verified, their kids recomputed, ${ED25519_FIXTURES.length} verified through a rotated signing-key set, and ${fingerprintVectors.vectors.length} fingerprint vectors matched OK`,
 );

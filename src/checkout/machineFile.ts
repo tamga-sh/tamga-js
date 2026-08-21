@@ -101,6 +101,7 @@ import { deriveHkdfKey, MACHINE_FILE_KEY_SALT } from "../crypto/hkdf.js";
 import { decryptAesGcm } from "../crypto/aesGcm.js";
 import { base64Decode } from "../internal/base64.js";
 import { CLOCK_SKEW_TOLERANCE_SECONDS } from "./licenseFile.js";
+import { selectSigningKey, type SigningKeySet } from "./keySet.js";
 import type { LicenseFileClaims } from "./licenseFile.js";
 import type { Machine } from "../models/machine.js";
 import type { LicenseScheme } from "../models/policy.js";
@@ -420,32 +421,129 @@ export async function verifyMachineFileWithClaims(
     throw CheckoutError.cryptoFailure("signature verification failed");
   }
 
-  // Branch on the encoding prefix from `alg`, never on whether `enc` happens to
-  // contain a dot.
-  let plaintext: Uint8Array;
+  const plaintext = await decodeMachineFilePlaintext(cert, encoding, keyMaterial);
+  return finishMachineFile(plaintext, now);
+}
+
+/**
+ * As {@link verifyMachineFileWithClaims}, selecting the public key by the
+ * file's own `kid` claim from a set of keys the caller already trusts.
+ *
+ * Same rotation defect and the same two distinct outcomes as
+ * {@link import("./licenseFile.js").verifyLicenseFileWithKeySet}: an unknown
+ * `kid` is a {@link import("../errors.js").SigningKeyError} (a stale key set),
+ * while a known `kid` whose signature then fails stays a
+ * {@link import("../errors.js").CheckoutError} of kind `"crypto"` (a forgery).
+ *
+ * ⚠️ **Ed25519-signed machine files only, and that is a server-side limit
+ * rather than a shortcut here.** There is no `scheme` parameter because a key
+ * set cannot serve the other three schemes: the only keys the account publishes
+ * are Ed25519 — rotation mints Ed25519 keys and writes a literal `"ed25519"`,
+ * and the account's RSA and ECDSA signing keys are neither published nor
+ * rotated at all. A {@link import("./keySet.js").SigningKeySet} accordingly
+ * holds 32-byte Ed25519 keys and nothing else, so there is no key in it that
+ * could verify an RSA or ECDSA signature whatever its `kid` names.
+ *
+ * A file whose `alg` names any other signing suffix is refused as a
+ * `CheckoutError` of kind `"unsupported-algorithm"` — fail-closed, and refused
+ * on the `alg` gate before a key is ever selected. Verify those with
+ * {@link verifyAndDecryptMachineFile} and the license's own `scheme`, and
+ * accept that a rotation is not a distinguishable outcome for them.
+ *
+ * `keyMaterial` is required only for an encrypted file, and `meta.exp` is
+ * enforced, both exactly as in {@link verifyMachineFileWithClaims}. The same
+ * ordering caveat applies as on the license-file path: the `kid` lives inside
+ * `enc`, so `enc` is decoded — and, when encrypted, decrypted — before the
+ * signature is checked. See
+ * {@link import("./licenseFile.js").verifyLicenseFileWithKeySet} for why that
+ * is safe.
+ */
+export async function verifyMachineFileWithKeySet(
+  pem: string,
+  keySet: SigningKeySet,
+  keyMaterial?: { licenseKey: string; fingerprint: string },
+  now?: number,
+): Promise<VerifiedMachineFile> {
+  const cert = parseMachineFile(pem);
+
+  // Throws for a missing/incorrect `+v2` marker or an unknown encoding prefix.
+  const { encoding, suffix } = parseMachineFileAlg(cert.alg);
+
+  // Not a cross-check against a caller-supplied scheme, as in
+  // `verifyMachineFileWithClaims`, but a hard restriction: the key set holds
+  // Ed25519 keys, and nothing else can be resolved from a `kid`.
+  const expectedSuffix = schemeAlgSuffix("ED25519_SIGN");
+  if (suffix !== expectedSuffix) {
+    throw CheckoutError.unsupportedAlgorithm(
+      `file declares alg suffix "${suffix}"; a signing key set can only verify "${expectedSuffix}" machine files`,
+    );
+  }
+
+  const plaintext = await decodeMachineFilePlaintext(cert, encoding, keyMaterial);
+
+  // Throws a typed SigningKeyError for an unknown or empty-account `kid` —
+  // deliberately not the error a forgery produces.
+  const { publicKey } = selectSigningKey(plaintext, keySet);
+
+  // ⚠️ Same gotcha as every other path here: the signature covers `enc`'s
+  // ASCII/UTF-8 STRING bytes, never its decoded bytes.
+  let sigBytes: Uint8Array;
+  try {
+    sigBytes = base64Decode(cert.sig);
+  } catch {
+    throw CheckoutError.invalidBase64();
+  }
+  if (!verifyEd25519(new TextEncoder().encode(cert.enc), sigBytes, publicKey)) {
+    throw CheckoutError.cryptoFailure("signature verification failed");
+  }
+
+  return finishMachineFile(plaintext, now);
+}
+
+/**
+ * Base64-decodes `enc` and — for the encrypted variant — splits its two halves
+ * and AES-256-GCM-opens them with the HKDF-derived machine-file key.
+ *
+ * Branches on the encoding prefix from `alg`, never on whether `enc` happens to
+ * contain a dot. Shared by {@link verifyMachineFileWithClaims} and
+ * {@link verifyMachineFileWithKeySet} so the two cannot drift; they differ only
+ * in *when* they call it relative to signature verification.
+ */
+async function decodeMachineFilePlaintext(
+  cert: ParsedMachineFile,
+  encoding: MachineFileEncoding,
+  keyMaterial: { licenseKey: string; fingerprint: string } | undefined,
+): Promise<Uint8Array> {
   if (encoding === ENCODING_PREFIX_PLAIN) {
     try {
-      plaintext = base64Decode(cert.enc);
+      return base64Decode(cert.enc);
     } catch {
       throw CheckoutError.invalidBase64();
     }
-  } else {
-    if (keyMaterial === undefined) {
-      throw CheckoutError.licenseKeyMissing();
-    }
-    const { nonce, ciphertextAndTag } = decodeEncryptedEnc(cert.enc);
-    const key = deriveHkdfKey(
-      new TextEncoder().encode(keyMaterial.licenseKey),
-      MACHINE_FILE_KEY_SALT,
-      new TextEncoder().encode(keyMaterial.fingerprint),
-    );
-    try {
-      plaintext = await decryptAesGcm(nonce, ciphertextAndTag, key);
-    } catch {
-      throw CheckoutError.cryptoFailure("decryption failed (wrong key or tampered ciphertext)");
-    }
   }
 
+  if (keyMaterial === undefined) {
+    throw CheckoutError.licenseKeyMissing();
+  }
+  const { nonce, ciphertextAndTag } = decodeEncryptedEnc(cert.enc);
+  const key = deriveHkdfKey(
+    new TextEncoder().encode(keyMaterial.licenseKey),
+    MACHINE_FILE_KEY_SALT,
+    new TextEncoder().encode(keyMaterial.fingerprint),
+  );
+  try {
+    return await decryptAesGcm(nonce, ciphertextAndTag, key);
+  } catch {
+    throw CheckoutError.cryptoFailure("decryption failed (wrong key or tampered ciphertext)");
+  }
+}
+
+/**
+ * Parses an authenticated payload and enforces its signed `exp` claim.
+ *
+ * Only ever called on bytes whose signature has verified.
+ */
+function finishMachineFile(plaintext: Uint8Array, now: number | undefined): VerifiedMachineFile {
   let payload: unknown;
   try {
     payload = JSON.parse(new TextDecoder().decode(plaintext));

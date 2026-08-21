@@ -21,7 +21,12 @@
  * retry or a different key can fix.
  */
 
-export { TamgaClient, MAX_PAGE_SIZE } from "./client.js";
+export {
+  TamgaClient,
+  MAX_PAGE_SIZE,
+  ARTIFACT_TTL_MIN_SECONDS,
+  ARTIFACT_TTL_MAX_SECONDS,
+} from "./client.js";
 export type {
   TamgaClientConfig,
   CreateMachineOptions,
@@ -31,6 +36,7 @@ export type {
   SortOrder,
   UpdateMachineOptions,
   UpgradeCheckOptions,
+  ArtifactDownloadOptions,
 } from "./client.js";
 
 export type {
@@ -66,6 +72,11 @@ export {
 } from "./models/machine.js";
 export type { OffsetPage, OffsetPageMeta } from "./models/page.js";
 export type { Release, ReleaseAttributes } from "./models/release.js";
+export type {
+  Artifact,
+  ArtifactAttributes,
+  ArtifactDownloadUrl,
+} from "./models/artifact.js";
 export type { HealthStatus } from "./models/health.js";
 export type {
   Policy,
@@ -114,7 +125,9 @@ export {
   LicenseExpiredError,
   LicenseNotAllowedError,
   CheckoutError,
+  SigningKeyError,
   ProofError,
+  FingerprintError,
   parseApiErrors,
   errorFromApiError,
   apiErrorFromResponseBody,
@@ -125,6 +138,7 @@ export {
   parseLicenseFile,
   verifyAndDecryptLicenseFile,
   verifyLicenseFileWithClaims,
+  verifyLicenseFileWithKeySet,
 } from "./checkout/licenseFile.js";
 export type {
   LicenseFileAlgorithm,
@@ -139,6 +153,7 @@ export {
   parseMachineFile,
   verifyAndDecryptMachineFile,
   verifyMachineFileWithClaims,
+  verifyMachineFileWithKeySet,
   checkTtl,
   MAX_TTL_SECS,
 } from "./checkout/machineFile.js";
@@ -152,7 +167,19 @@ export type {
 
 export { parseProofToken, verifyOfflineProof } from "./proof.js";
 
+export {
+  computeFingerprint,
+  canonicalFingerprintString,
+  FINGERPRINT_DOMAIN,
+} from "./fingerprint.js";
+export type { FingerprintComponent } from "./fingerprint.js";
+
+export { SigningKeySet, isWellFormedKeyId } from "./checkout/keySet.js";
+export type { SigningKeyIdMismatch } from "./checkout/keySet.js";
+export type { SigningKey, SigningKeyAttributes } from "./models/signingKey.js";
+
 export { verifyEd25519 } from "./crypto/ed25519.js";
+export { signingKeyId, UNBACKFILLED_ACCOUNT_KEY_ID, SIGNING_KEY_ID_LENGTH } from "./crypto/keyId.js";
 export { verifyEcdsaP256 } from "./crypto/ecdsa.js";
 export { verifyRsaPkcs1, verifyRsaPss } from "./crypto/rsa.js";
 export { deriveHkdfKey } from "./crypto/hkdf.js";
