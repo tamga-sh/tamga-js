@@ -21,6 +21,16 @@
  * carries no policy join, so its `next_heartbeat_at` is always
  * `last_heartbeat_at + 600s`.
  *
+ * ⚠️ If you take the `heartbeatWindowMsFromMachine` route, branch on its
+ * `undefined` rather than asserting it away. It returns `number | undefined`
+ * and `undefined` is the *normal* answer for a machine that has not been
+ * pinged yet — i.e. the one you just activated. `heartbeatWindowMsFromMachine(m)!
+ * / MACHINE_HEARTBEAT_INTERVAL_DIVISOR` is `NaN` in exactly that case, and
+ * `setInterval` turns `NaN` into a 1 ms tick rather than refusing it.
+ * `startHeartbeat` floors its interval at 1s so this can no longer flood the
+ * server, but a floored interval is still not the interval you wanted. This
+ * example sidesteps the whole question by using `startHeartbeatFromPolicy`.
+ *
  * ⚠️ There is deliberately no `case "DEAD"` below, because a *ping* cannot
  * return that status: it writes `last_heartbeat_at = NOW()` and then derives
  * the status from that same timestamp, so it answers ALIVE or RESURRECTED.

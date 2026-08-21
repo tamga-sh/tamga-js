@@ -250,6 +250,12 @@ export function toPidString(pid: string | number): string {
  * {@link import("../client.js").TamgaClient.startHeartbeatFromPolicy}; exported
  * so a caller sizing its own timer off
  * {@link heartbeatWindowMsFromMachine} reaches the same number.
+ *
+ * ⚠️ Dividing by this is where the recommended composition goes wrong.
+ * `heartbeatWindowMsFromMachine` returns `number | undefined`, so
+ * `heartbeatWindowMsFromMachine(m)! / MACHINE_HEARTBEAT_INTERVAL_DIVISOR` —
+ * with the non-null assertion the type forces — is `NaN` whenever the machine
+ * has not been pinged yet. Handle the `undefined` explicitly instead.
  */
 export const MACHINE_HEARTBEAT_INTERVAL_DIVISOR = 3;
 
@@ -279,6 +285,19 @@ export const MACHINE_HEARTBEAT_INTERVAL_DIVISOR = 3;
  *
  * When no machine file or read is available, ask the policy instead:
  * {@link import("../client.js").TamgaClient.resolveHeartbeatWindowMs}.
+ *
+ * ⚠️ **`undefined` is a real, common return — do not assert it away.** It is
+ * what you get on any machine that has not been pinged yet, which includes
+ * every freshly activated one. The obvious next step,
+ * `heartbeatWindowMsFromMachine(m)! / MACHINE_HEARTBEAT_INTERVAL_DIVISOR`,
+ * is therefore `NaN` exactly when a scheduler is most likely to be starting
+ * up — and `NaN` is a delay `setInterval` turns into a 1 ms tick rather than
+ * refusing.
+ * {@link import("../client.js").TamgaClient.startHeartbeat} floors its
+ * interval so that can no longer flood the server, but the interval is still
+ * wrong. Branch on `undefined` and fall back to
+ * {@link import("../client.js").TamgaClient.startHeartbeatFromPolicy} or to a
+ * window learned out of band.
  */
 export function heartbeatWindowMsFromMachine(machine: Machine): number | undefined {
   const { last_heartbeat_at: last, next_heartbeat_at: next } = machine.attributes;

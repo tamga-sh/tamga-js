@@ -488,7 +488,12 @@ Things this SDK deliberately does not do, or cannot do yet.
   ```
 
   `heartbeatWindowMsFromMachine(machine)` does exactly this, so you need not
-  re-derive it.
+  re-derive it. ⚠️ It returns `number | undefined`, and `undefined` is the
+  common case, not an edge one — it is what any machine that has not been
+  pinged yet gives you, which includes every freshly activated one. So do
+  **not** write `heartbeatWindowMsFromMachine(m)! / 3`: that is `NaN` exactly
+  when a scheduler is starting up, and `NaN` is a delay `setInterval` turns
+  into a 1 ms tick rather than refusing. Branch on the `undefined`.
 
   Three caveats: a `pingHeartbeat` response does **not** work for this (that
   query carries no policy join, so `next_heartbeat_at` comes back as
@@ -509,15 +514,23 @@ Things this SDK deliberately does not do, or cannot do yet.
   `effective_heartbeat_duration_secs` returns whatever it holds; only `NULL`
   takes the 600s fallback. That is deliberate: rounding a misconfigured policy
   up to something friendlier in the accessor would hide it. The guard lives in
-  the scheduler instead. `startHeartbeat` confines `intervalMs` to
-  `[1s, 2147483647ms]`, with a non-finite value falling back to the floor, so
-  dividing a zero window by three and passing the result by hand starts a
-  once-a-second timer rather than a busy loop. It has to: `setInterval` does not
-  honour a degenerate delay, it shortens it — `0`, a negative number, `NaN`,
-  `Infinity` and anything past the signed-32-bit ceiling all tick every 1 ms,
-  which is a silent flood of individually valid, correctly authenticated pings
-  rather than a crash. `startProcessHeartbeat` takes the same floor. The 30s
-  **process** window is genuinely hardcoded server-side and needs no such care.
+  the scheduler instead. **`startHeartbeat` clamps `intervalMs` to
+  `[1000, 2147483647]`** and truncates it to an integer; a non-finite value
+  becomes `1000`. Worked through: `20000` stays `20000`, `500` becomes `1000`,
+  `1` becomes `1000`, `0`/`-1`/`NaN` become `1000`, `2**31` becomes
+  `2147483647`. Nothing throws. `startProcessHeartbeat` applies the same clamp;
+  `startHeartbeatFromPolicy` inherits it.
+
+  The floor is flat rather than a guard on just the values `setInterval`
+  refuses to honour, and the reason is that the rewrite is not what does the
+  damage — the rate is. `setInterval` honours `1` *exactly*, and `1` is the
+  same ~740 pings a second as `0` (measured: `0` → 1.4 ms/tick, `1` → 1.35,
+  `2` → 2.55, `3` → 3.75, `500` → 501). A rule clamping `0` but passing `1`
+  would give two inputs with identical behaviour opposite treatment. The floor
+  costs nothing a policy can ask for: `heartbeat_duration` is an
+  integer-**seconds** column, so the shortest expressible window is 1s and a
+  once-a-second ping is inside every policy that exists. The 30s **process**
+  window is genuinely hardcoded server-side and needs no such care.
 - **Eight of the 24 `ValidationCode` values are not reachable today.** They are
   modelled for forward-compatibility (`src/models/validation.ts`); do not write
   logic that depends on receiving one. `ENTITLEMENTS_MISSING` and

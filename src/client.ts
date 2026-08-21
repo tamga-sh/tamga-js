@@ -976,7 +976,8 @@ export class TamgaClient {
    * - `next_heartbeat_at` is computed against the policy's real
    *   `heartbeat_duration`, not the 600 s fallback, so
    *   {@link import("./models/machine.js").heartbeatWindowMsFromMachine} works
-   *   on it.
+   *   on it — returning `undefined`, not a number, until the machine has been
+   *   pinged once, so check for that rather than asserting it away with `!`.
    *
    * ⚠️ The `machines` resource does not serialize `license_id`, so a machine
    * fetched by id carries no evidence of which license owns it. Use
@@ -1179,29 +1180,55 @@ export class TamgaClient {
    * callers that need to re-activate on deletion should drive
    * {@link pingHeartbeat} on their own timer and catch `NotFoundError`.
    *
-   * ⚠️ **`intervalMs` is confined to `[1s, 2147483647ms]`**, and a non-finite
-   * value falls back to the 1 s floor. That is a guard against a busy loop,
-   * not a rounding convenience: `setInterval` shortens a degenerate delay
-   * rather than honouring it, so `0`, a negative number, `NaN`, `Infinity`
-   * and anything past the 32-bit ceiling all tick every 1 ms — roughly a
-   * thousand `ping-heartbeat` requests a second, from every machine running
-   * that code, each one individually valid and correctly authenticated. The
-   * guard lives in the primitive, rather than in the callers that compute an
-   * interval, so it holds however a caller reaches this timer —
-   * {@link startHeartbeatFromPolicy} inherits it rather than repeating it.
+   * ⚠️ **The interval contract, exactly.** `intervalMs` is clamped to
+   * `[1000, 2147483647]` and truncated to an integer; a non-finite value
+   * (`NaN`, `±Infinity`) becomes `1000`. Concretely: `20000` stays `20000`,
+   * `500` becomes `1000`, `1` becomes `1000`, `0` and `-1` become `1000`,
+   * `NaN` becomes `1000`, and `2**31` becomes `2147483647`. This is a floor,
+   * not a rejection — nothing throws, and the returned stop function behaves
+   * the same either way.
    *
-   * Reaching it by accident is easy, because the two obvious sources for
-   * `intervalMs` can both hand you a degenerate one. {@link
-   * resolveHeartbeatWindowMs} reports the window the server will judge the
-   * machine on *verbatim*, including the `0` or negative `heartbeat_duration`
-   * the column permits (it carries no `CHECK` constraint), so
-   * `startHeartbeat(id, await this.resolveHeartbeatWindowMs(licenseId) / 3)`
-   * can be handed `0`. {@link
+   * **Why a flat 1 s floor, and not merely a guard on the values
+   * `setInterval` refuses to honour.** That narrower rule is tempting, because
+   * `0`, a negative, `NaN`, `Infinity` and anything past the 32-bit ceiling
+   * are exactly the values the runtime silently rewrites to a 1 ms tick. But
+   * the rewrite is not what does the damage, the resulting rate is — and the
+   * runtime honours `1` *exactly*, which is the same ~740 `ping-heartbeat`
+   * requests a second as `0` (measured: `0` → 1.4 ms/tick, `1` → 1.35, `2` →
+   * 2.55, `3` → 3.75). A rule that clamps `0` and passes `1` through would
+   * treat two inputs with identical observable behaviour differently, so it
+   * describes where a number came from rather than what it does. Only a floor
+   * bounds the rate.
+   *
+   * **What the floor costs.** Nothing a policy can ask for.
+   * `heartbeat_duration` is an integer-**seconds** column, so the shortest
+   * window the server can express is 1 s and a once-a-second ping is inside
+   * every policy that exists. A caller who passed `500` was buying two pings
+   * per second against a window measured in seconds; at `1000` they still ping
+   * at least once per window under the tightest policy expressible. The
+   * clamped range is `1..999` and past 24.8 days, and no configuration needs
+   * either. What it buys is that the SDK cannot be made to flood the licensing
+   * server — not a crash, but a silent spin of individually valid, correctly
+   * authenticated pings from every machine running that code, which is the
+   * failure mode nothing on either end reports.
+   *
+   * The guard lives in this primitive, not in the callers that compute an
+   * interval, so it holds however the timer is reached —
+   * {@link startHeartbeatFromPolicy} inherits it rather than repeating it, and
+   * {@link startProcessHeartbeat} applies the same one.
+   *
+   * ⚠️ **Two documented compositions can hand this method a degenerate
+   * interval**, which is why the floor is here rather than at the call sites.
+   * {@link resolveHeartbeatWindowMs} reports the window *verbatim*, including
+   * the `0` or negative `heartbeat_duration` the column permits (it carries no
+   * `CHECK` constraint), so `startHeartbeat(id, windowMs / 3)` over such a
+   * policy is handed `0`. And {@link
    * import("./models/machine.js").heartbeatWindowMsFromMachine} returns
-   * `number | undefined`, so the same composition over an
-   * as-yet-unpinged machine can be handed `NaN`. Neither now busy-loops.
-   * A sub-second heartbeat is never a real request — the server's window is
-   * an integer-seconds column — so nothing legitimate is clamped away.
+   * `number | undefined`, so the same shape written as
+   * `heartbeatWindowMsFromMachine(m)! / 3` — with the non-null assertion the
+   * type forces on you — yields `NaN` on a machine that has never been pinged.
+   * Prefer an explicit `undefined` check over `!` there; either way this
+   * method no longer spins on the result.
    */
   startHeartbeat(machineId: string, intervalMs: number): () => void {
     const timer = setInterval(() => {
@@ -1230,7 +1257,13 @@ export class TamgaClient {
    * Prefer `startHeartbeat(id, windowMs / 3)` with
    * {@link import("./models/machine.js").heartbeatWindowMsFromMachine} when a
    * read-backed machine is already in hand — a checked-out machine file carries
-   * the same number for free. Reach for this when one is not.
+   * the same number for free. Reach for this when one is not. ⚠️ That helper
+   * returns `number | undefined`, so write the `undefined` case out rather
+   * than reaching for `!`: `heartbeatWindowMsFromMachine(m)! / 3` is `NaN` on a
+   * machine that has never been pinged, and `NaN` is a value `setInterval`
+   * turns into a 1 ms tick. {@link startHeartbeat} floors it, so the mistake
+   * costs a wrong interval rather than a flood — but it is still the wrong
+   * interval.
    *
    * ⚠️ Reads the policy through the **license**, not `GET /policies/{id}`. The
    * two are not equivalent under license-key auth: the license route needs only

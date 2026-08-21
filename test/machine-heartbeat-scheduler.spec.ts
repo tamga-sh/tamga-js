@@ -193,6 +193,91 @@ describe("TamgaClient.startHeartbeat cannot be turned into a busy loop", () => {
     stop();
   });
 
+  /**
+   * The case that decides the *shape* of the guard, not just its presence.
+   *
+   * A narrower rule — clamp only what `setInterval` refuses to honour, i.e.
+   * non-positive, non-finite, past the ceiling — is tempting, because it
+   * changes behaviour for no value the runtime honours. It is wrong, and `1`
+   * is the counterexample: the runtime honours it exactly, and it is the same
+   * flood as `0`. Measured on Node: `0` ticks at 1.4 ms, `1` at 1.35 ms —
+   * ~740 pings a second either way. A rule that clamped `0` and passed `1`
+   * through would give two inputs with identical observable behaviour
+   * opposite treatment.
+   *
+   * If someone later narrows the guard to "degenerate values only", this test
+   * is what fails.
+   */
+  it.each([
+    ["1ms, which the runtime honours exactly and is the same flood as 0", 1],
+    ["2ms", 2],
+    ["3ms", 3],
+  ])("floors %s, because the rate is the defect and not the runtime rewrite", async (
+    _label,
+    intervalMs,
+  ) => {
+    const fetchMock = mockJsonApiResponse({ id: "m-1", type: "machines", attributes: {} });
+
+    const stop = client().startHeartbeat("m-1", intervalMs);
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(fetchMock).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1001);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    stop();
+  });
+
+  /**
+   * The only value the floor retimes that was not already a flood, pinned
+   * explicitly so the cost of the guard is visible in the suite rather than
+   * only in prose. 500ms is honoured by the runtime (measured: 501ms/tick,
+   * 2 req/sec) and is a legitimate-if-wasteful choice; it still becomes
+   * 1000ms, because `heartbeat_duration` is an integer-seconds column and no
+   * policy the server can express needs a sub-second ping.
+   */
+  it("retimes a 500ms interval to 1s — the one honoured value the floor moves", async () => {
+    const fetchMock = mockJsonApiResponse({ id: "m-1", type: "machines", attributes: {} });
+
+    const stop = client().startHeartbeat("m-1", 500);
+
+    // Would have been two pings before this change.
+    await vi.advanceTimersByTimeAsync(999);
+    expect(fetchMock).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    stop();
+  });
+
+  it("passes 999ms through the floor but 1000ms untouched — the exact boundary", async () => {
+    const fetchMock = mockJsonApiResponse({ id: "m-1", type: "machines", attributes: {} });
+    const stop = client().startHeartbeat("m-1", 999);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(fetchMock).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    stop();
+
+    vi.unstubAllGlobals();
+    const atFloor = mockJsonApiResponse({ id: "m-1", type: "machines", attributes: {} });
+    const stop2 = client().startHeartbeat("m-1", 1000);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(atFloor).toHaveBeenCalledTimes(1);
+    stop2();
+  });
+
+  it("truncates a fractional interval rather than letting it reach setInterval", async () => {
+    // `setInterval` truncates a non-integer delay itself, so 1500.9 is not a
+    // hazard — this pins the documented contract ("truncated to an integer"),
+    // not a defect.
+    const fetchMock = mockJsonApiResponse({ id: "m-1", type: "machines", attributes: {} });
+    const stop = client().startHeartbeat("m-1", 1500.9);
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
   it("leaves an interval that is already sane exactly as given", async () => {
     const fetchMock = mockJsonApiResponse({ id: "m-1", type: "machines", attributes: {} });
 
