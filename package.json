@@ -44,7 +44,7 @@
     "doc-versions:check": "node scripts/doc-versions.mjs --check"
   },
   "dependencies": {
-    "@noble/curves": "^1.6.0",
+    "@noble/curves": "^2.4.0",
     "@noble/hashes": "^1.5.0"
   },
   "devDependencies": {
