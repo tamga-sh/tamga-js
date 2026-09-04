@@ -16,7 +16,7 @@ The Tamga API protocol specification is the source of truth for wire format, end
 package.json                # "type": "module", exports map (import/require/types), engines.node >=18, packageManager (pnpm via Corepack)
 tsup.config.ts               # format: ["esm", "cjs"], dts: true, target: "es2022"
 tsconfig.json                 # strict: true, target ES2022, moduleResolution "bundler"
-eslint.config.js               # flat config, @typescript-eslint parser+plugin directly (not the typescript-eslint meta-package's recommended presets, to match the pinned dependency set) + no-console
+eslint.config.js               # flat config built with the typescript-eslint meta-package (its recommended preset supplies the parser and plugin; neither is a direct dependency) + no-console
 vitest.config.ts                # coverage.provider "v8", 80% thresholds (lines/functions/branches/statements)
 
 src/
