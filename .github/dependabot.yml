@@ -13,6 +13,12 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "@noble/hashes"
         update-types: ["version-update:semver-major"]
+      # @changesets/cli 3.x's `changeset publish` crashes in getUnpublishedPackages
+      # (TypeError reading 'includes') under this repo's npm trusted-publishing setup;
+      # CI never exercises publish, so the 3.0.1 bump went green and broke the 0.4.3
+      # release. Stay on 2.x until a 3.x publish is verified by hand.
+      - dependency-name: "@changesets/cli"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
