@@ -4,6 +4,15 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    ignore:
+      # @noble/curves 2.x and @noble/hashes 2.x are ESM-only and require
+      # Node >= 20.19, and the curves upgrade changes ECDSA sign/verify
+      # defaults (prehash, lowS, output format). They move together, as a
+      # deliberate minor that drops the Node 18 floor, not as a bot bump.
+      - dependency-name: "@noble/curves"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@noble/hashes"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
