@@ -134,6 +134,8 @@ jobs:
     # would block every dependency PR forever. Its bumps here are dev-only in
     # practice; when one does reach the published package, the reviewer adds the
     # changeset by hand.
+    # `.changeset/config.json`'s `changedFilePatterns` scopes the check to `src/**`,
+    # so devDependency, config and doc changes need no changeset.
     if: >-
       github.event_name == 'pull_request'
       && !startsWith(github.head_ref, 'changeset-release/')
