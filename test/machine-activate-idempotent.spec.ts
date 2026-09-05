@@ -40,6 +40,30 @@ function machinePage(...machines: unknown[]): Response {
   });
 }
 
+/**
+ * A `409 FINGERPRINT_TAKEN` that names the machine holding the fingerprint —
+ * the exact wire shape the API patch specifies (`errors[0].meta.machineId`,
+ * `status` as the JSON:API STRING), sent ONLY when that machine is on the
+ * requested license.
+ */
+function fingerprintTakenNaming(machineId: string): Response {
+  return jsonApi(
+    {
+      errors: [
+        {
+          id: "e1",
+          status: "409",
+          code: "FINGERPRINT_TAKEN",
+          title: "Conflict",
+          detail: "already activated",
+          meta: { machineId },
+        },
+      ],
+    },
+    409,
+  );
+}
+
 describe("activateMachine without reuseExistingMachine", () => {
   it("still throws FINGERPRINT_TAKEN — reuse is opt-in", async () => {
     const fetchMock = mockSequence(errorDoc(409, "FINGERPRINT_TAKEN", "already activated"));
@@ -127,6 +151,95 @@ describe("activateMachine with reuseExistingMachine", () => {
       false,
     );
     expect(result.machine?.id).toBe("m-existing");
+  });
+
+  it("adopts the machine the conflict names with one GET, and does not search", async () => {
+    const fetchMock = mockSequence(
+      fingerprintTakenNaming("m-existing"),
+      jsonApi({ data: existingMachine }),
+      validation("VALID"),
+    );
+
+    const result = await client().activateMachine("lic-1", "fp-1", {}, undefined, false, true);
+
+    expect(result.machine?.id).toBe("m-existing");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const [url, init] = nthCall(fetchMock, 1);
+    expect(init.method).toBe("GET");
+    expect(url.pathname.endsWith("/machines/m-existing")).toBe(true);
+    expect(url.searchParams.has("filter[license]")).toBe(false);
+  });
+
+  it("falls back to the scoped search when the named machine's fingerprint does not match", async () => {
+    // `getMachine` is NOT license-scoped (see its own doc comment — any
+    // credential can read any machine in the account), so a mismatched
+    // fingerprint means the GET answered with some other machine entirely,
+    // and the fast path must not adopt it.
+    const wrongFingerprintMachine = {
+      id: "m-wrong",
+      type: "machines",
+      attributes: { fingerprint: "not-fp-1" },
+    };
+    const foundBySearch = { id: "m-found", type: "machines", attributes: { fingerprint: "fp-1" } };
+    const fetchMock = mockSequence(
+      fingerprintTakenNaming("m-wrong"),
+      jsonApi({ data: wrongFingerprintMachine }),
+      machinePage(foundBySearch),
+      validation("VALID"),
+    );
+
+    const result = await client().activateMachine("lic-1", "fp-1", {}, undefined, false, true);
+
+    expect(result.machine?.id).toBe("m-found");
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(nthCall(fetchMock, 2)[0].searchParams.get("filter[license]")).toBe("lic-1");
+  });
+
+  it("falls back to the scoped search, without ever sending it as a path segment, when meta.machineId is malformed/traversal-shaped", async () => {
+    const fetchMock = mockSequence(
+      fingerprintTakenNaming("../../etc/passwd"),
+      machinePage(existingMachine),
+      validation("VALID"),
+    );
+
+    const result = await client().activateMachine("lic-1", "fp-1", {}, undefined, false, true);
+
+    expect(result.machine?.id).toBe("m-existing");
+    // Only 3 calls total: the conflict, the scoped search, and validate — no
+    // GET was attempted with the malformed id as a path segment.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(nthCall(fetchMock, 1)[0].searchParams.get("filter[license]")).toBe("lic-1");
+  });
+
+  it("falls back to the scoped search when the named machine is gone", async () => {
+    // The id the server named can vanish between the 409 and the GET.
+    const fetchMock = mockSequence(
+      fingerprintTakenNaming("m-gone"),
+      errorDoc(404, "NOT_FOUND", "gone"),
+      machinePage(existingMachine),
+      validation("VALID"),
+    );
+
+    const result = await client().activateMachine("lic-1", "fp-1", {}, undefined, false, true);
+
+    expect(result.machine?.id).toBe("m-existing");
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(nthCall(fetchMock, 2)[0].searchParams.get("filter[license]")).toBe("lic-1");
+  });
+
+  it("still searches, then re-throws, on a conflict that names nothing", async () => {
+    // A pre-patch server, or a cross-license conflict under a wider
+    // uniqueness strategy: no `meta`, and the license-scoped search decides.
+    const fetchMock = mockSequence(
+      errorDoc(409, "FINGERPRINT_TAKEN", "already activated elsewhere"),
+      machinePage(),
+    );
+
+    await expect(
+      client().activateMachine("lic-1", "fp-1", {}, undefined, false, true),
+    ).rejects.toBeInstanceOf(FingerprintTakenError);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(nthCall(fetchMock, 1)[0].searchParams.get("filter[license]")).toBe("lic-1");
   });
 });
 

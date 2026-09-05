@@ -124,6 +124,8 @@ export {
   LicenseSuspendedError,
   LicenseExpiredError,
   LicenseNotAllowedError,
+  SigningKeyMissingError,
+  SecretKeyMissingError,
   CheckoutError,
   SigningKeyError,
   ProofError,

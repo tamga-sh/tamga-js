@@ -325,14 +325,21 @@ Three things about this are deliberate and worth knowing before you build on it:
 
 - **Retired keys belong in the set.** Filtering down to the active key
   reintroduces the very problem this solves.
-- **There is no "try every key" fallback.** The `kid` selects one key and only
-  that key is used. Trying them all would verify the same files while collapsing
-  "stale key set" and "forgery" back into one indistinguishable error.
+- **Every held key is tried against the signature before a byte of the file is
+  decoded.** The `kid` is read afterwards, only to label a failure: not held →
+  `SigningKeyError`; held → `CheckoutError` `"crypto"` with `reason:
+  "signature"`. Once a signature has verified, `reason: "decryption"` usually
+  means the wrong license key — except that `alg` is **not** covered by the
+  signature, so a verified license file whose `alg` was flipped from the
+  plain to the encrypted variant produces the same `reason: "decryption"`
+  even with the correct key. Trust `alg` only when it comes from a source you
+  control, not merely because the file verified.
 - **`SigningKeyError` has a third kind, `"no-published-signing-key"`.** The
   server signs with `ed25519_public_key.unwrap_or_default()`, so an account whose
   key was never published signs every file with the `kid` of the empty string.
   No client-side action fixes that one, which is why it is not reported as a
-  merely stale key set.
+  merely stale key set. Post-patch servers publish a key with every account and
+  repair the public half at startup, so only pre-patch files carry that `kid`.
 
 `signingKeyId(publicKeyBase64)` computes the `kid` for a key you hold. ⚠️ It
 hashes the **base64 string** the server publishes, not the 32 decoded bytes —
@@ -749,12 +756,14 @@ Things this SDK deliberately does not do, or cannot do yet.
   bare number and cannot know where it came from. The interaction table is
   pinned in `test/policy-read.spec.ts`. The 30s **process** window is genuinely hardcoded
   server-side and needs no such care.
-- **Eight of the 24 `ValidationCode` values are not reachable today.** They are
-  modelled for forward-compatibility (`src/models/validation.ts`); do not write
-  logic that depends on receiving one. `ENTITLEMENTS_MISSING` and
-  `FINGERPRINT_SCOPE_MISMATCH` are **not** among them any more — the scope
-  fields behind them are enforced now, so a scoped `validateById` really can
-  come back with either.
+- **Five of the 24 `ValidationCode` values are not reachable today** —
+  `NOT_FOUND`, `BANNED`, `COMPONENTS_SCOPE_MISMATCH`, `CHECKSUM_SCOPE_MISMATCH`,
+  `VERSION_SCOPE_MISMATCH`. They are modelled for forward-compatibility
+  (`src/models/validation.ts`); do not write logic that depends on receiving
+  one. `TOO_MANY_USERS`, `HEARTBEAT_DEAD` and `HEARTBEAT_NOT_STARTED` joined the
+  reachable set with the API patch, and `ENTITLEMENTS_MISSING`/
+  `FINGERPRINT_SCOPE_MISMATCH` have been live since the scope fields behind them
+  were enforced.
 
 ## Documentation
 

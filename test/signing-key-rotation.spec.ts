@@ -127,7 +127,9 @@ describe("an unknown kid is a different incident from a forged signature", () =>
   it("names a key nobody holds → SigningKeyError, not a crypto failure", async () => {
     const key = signingKeypair();
     const pem = await buildLicensePem(licensePayloadJsonWithKid("0f0f0f0f0f0f0f0f"), key.secretKey);
-    const keySet = SigningKeySet.fromPublicKeys([key.publicKeyB64]);
+    // The signer is not in the set either: a file signed by a held key
+    // verifies whatever kid it names, so "unknown" needs an unknown signer.
+    const keySet = SigningKeySet.fromPublicKeys([signingKeypair().publicKeyB64]);
 
     try {
       await verifyLicenseFileWithKeySet(pem, keySet, undefined, ISSUED_AT);
@@ -161,19 +163,18 @@ describe("an unknown kid is a different incident from a forged signature", () =>
     }
   });
 
-  it("does not fall back to trying every key in the set", async () => {
-    // Trying them all would verify this file — and would destroy the very
-    // distinction above, which is the defect rather than the fix.
+  it("verifies through whichever held key signed it, whatever kid it names", async () => {
+    // The signature decides; the kid only labels a failure. A file signed by a
+    // held key verifies even when its kid names another held key — the old
+    // "no try-every-key" rule is gone on purpose.
     const signer = signingKeypair();
     const other = signingKeypair();
     const pem = await buildLicensePem(licensePayloadJsonWithKid(other.kid), signer.secretKey);
     const keySet = SigningKeySet.fromPublicKeys([other.publicKeyB64, signer.publicKeyB64]);
 
-    // `signer`'s key IS in the set and DID sign the bytes; only the kid points
-    // elsewhere. It must still fail.
-    await expect(verifyLicenseFileWithKeySet(pem, keySet, undefined, ISSUED_AT)).rejects.toThrow(
-      CheckoutError,
-    );
+    await expect(
+      verifyLicenseFileWithKeySet(pem, keySet, undefined, ISSUED_AT),
+    ).resolves.toBeDefined();
   });
 });
 
@@ -188,7 +189,7 @@ describe("an account that never published a signing key", () => {
       licensePayloadJsonWithKid(UNBACKFILLED_ACCOUNT_KEY_ID),
       key.secretKey,
     );
-    const keySet = SigningKeySet.fromPublicKeys([key.publicKeyB64]);
+    const keySet = SigningKeySet.fromPublicKeys([signingKeypair().publicKeyB64]);
 
     try {
       await verifyLicenseFileWithKeySet(pem, keySet, undefined, ISSUED_AT);
@@ -295,6 +296,26 @@ describe("a payload with no usable kid claim", () => {
       /pre-v2 file/,
     );
   });
+
+  it("no usable kid AND no held key verifying it → labelKeySetFailure's own catch, not a plain signature mismatch", async () => {
+    // Every case above signs with a key that IS in the set, so the signature
+    // verifies and `probeKeyIdClaim` runs on the SUCCESS path, straight out of
+    // `licenseFile.ts`. This one signs with a key the set does NOT hold, so no
+    // held key verifies the signature and `labelKeySetFailure` runs instead —
+    // its own `probeKeyIdClaim` call sees the same missing `kid` and, with
+    // nothing to label the failure by, the signature failure stands.
+    const signer = signingKeypair();
+    const untrusted = signingKeypair();
+    const payload = JSON.parse(licensePayloadJsonWithKid("x")) as { meta: Record<string, unknown> };
+    delete payload.meta.kid;
+    const pem = await buildLicensePem(JSON.stringify(payload), signer.secretKey);
+    const keySet = SigningKeySet.fromPublicKeys([untrusted.publicKeyB64]);
+
+    await expect(verifyLicenseFileWithKeySet(pem, keySet, undefined, ISSUED_AT)).rejects.toMatchObject({
+      kind: "crypto",
+      reason: "signature",
+    });
+  });
 });
 
 describe("machine files through a key set", () => {
@@ -314,8 +335,9 @@ describe("machine files through a key set", () => {
   });
 
   it("handles the dot-separated encrypted enc", async () => {
-    // The kid is inside the ciphertext, so both halves have to be decoded and
-    // opened before a key can be selected at all.
+    // The signature is checked against every held key before either half is
+    // decoded; both the license key and the fingerprint are then needed to
+    // open it.
     const key = signingKeypair();
     const encryptionKey = deriveHkdfKey(
       new TextEncoder().encode(LICENSE_KEY),
@@ -346,7 +368,7 @@ describe("machine files through a key set", () => {
 
     const unknown = await buildEd25519MachinePemWithKey(
       machinePayloadJsonWithKid("0f0f0f0f0f0f0f0f"),
-      trusted.secretKey,
+      signingKeypair().secretKey,
     );
     await expect(verifyMachineFileWithKeySet(unknown, keySet, undefined, ISSUED_AT)).rejects.toThrow(
       SigningKeyError,
@@ -400,5 +422,79 @@ describe("machine files through a key set", () => {
         expect((error as CheckoutError).kind).toBe("unsupported-algorithm");
       }
     }
+  });
+});
+
+describe("a key set verifies before it decrypts", () => {
+  it("license file: a stale set plus the wrong key is a signature failure; a held signer plus the wrong key is a decryption failure", async () => {
+    const signer = signingKeypair();
+    const pem = await buildLicensePem(
+      licensePayloadJsonWithKid(signer.kid),
+      signer.secretKey,
+      deriveLicenseFileKey(LICENSE_KEY),
+    );
+    const stale = SigningKeySet.fromPublicKeys([signingKeypair().publicKeyB64]);
+    const held = SigningKeySet.fromPublicKeys([signer.publicKeyB64]);
+
+    // Nothing held signed it: the ciphertext is opened only to read the kid,
+    // cannot be, and the signature failure stands unlabelled.
+    await expect(verifyLicenseFileWithKeySet(pem, stale, "wrong-key", ISSUED_AT)).rejects.toMatchObject({
+      kind: "crypto",
+      reason: "signature",
+    });
+    // The signature verified, so `enc` is authentic and only the key is wrong.
+    await expect(verifyLicenseFileWithKeySet(pem, held, "wrong-key", ISSUED_AT)).rejects.toMatchObject({
+      kind: "crypto",
+      reason: "decryption",
+    });
+    await expect(
+      verifyLicenseFileWithKeySet(pem, held, LICENSE_KEY, ISSUED_AT),
+    ).resolves.toBeDefined();
+  });
+
+  it("license file: a stale set is still named as stale given the license key, and a missing key is reported as missing", async () => {
+    const signer = signingKeypair();
+    const pem = await buildLicensePem(
+      licensePayloadJsonWithKid(signer.kid),
+      signer.secretKey,
+      deriveLicenseFileKey(LICENSE_KEY),
+    );
+    const stale = SigningKeySet.fromPublicKeys([signingKeypair().publicKeyB64]);
+
+    await expect(
+      verifyLicenseFileWithKeySet(pem, stale, LICENSE_KEY, ISSUED_AT),
+    ).rejects.toMatchObject({ kind: "unknown-key-id", keyId: signer.kid });
+    await expect(
+      verifyLicenseFileWithKeySet(pem, stale, undefined, ISSUED_AT),
+    ).rejects.toMatchObject({ kind: "license-key-missing" });
+  });
+
+  it("machine file: the wrong fingerprint after a verified signature is a decryption failure too", async () => {
+    const signer = signingKeypair();
+    const encryptionKey = deriveHkdfKey(
+      new TextEncoder().encode(LICENSE_KEY),
+      MACHINE_FILE_KEY_SALT,
+      new TextEncoder().encode(FINGERPRINT),
+    );
+    const pem = await buildEd25519MachinePemWithKey(
+      machinePayloadJsonWithKid(signer.kid),
+      signer.secretKey,
+      encryptionKey,
+    );
+    const stale = SigningKeySet.fromPublicKeys([signingKeypair().publicKeyB64]);
+    const held = SigningKeySet.fromPublicKeys([signer.publicKeyB64]);
+
+    await expect(
+      verifyMachineFileWithKeySet(pem, stale, { licenseKey: "wrong-key", fingerprint: FINGERPRINT }, ISSUED_AT),
+    ).rejects.toMatchObject({ kind: "crypto", reason: "signature" });
+    await expect(
+      verifyMachineFileWithKeySet(pem, held, { licenseKey: "wrong-key", fingerprint: FINGERPRINT }, ISSUED_AT),
+    ).rejects.toMatchObject({ kind: "crypto", reason: "decryption" });
+    await expect(
+      verifyMachineFileWithKeySet(pem, held, { licenseKey: LICENSE_KEY, fingerprint: "fp-other" }, ISSUED_AT),
+    ).rejects.toMatchObject({ kind: "crypto", reason: "decryption" });
+    await expect(
+      verifyMachineFileWithKeySet(pem, held, { licenseKey: LICENSE_KEY, fingerprint: FINGERPRINT }, ISSUED_AT),
+    ).resolves.toBeDefined();
   });
 });

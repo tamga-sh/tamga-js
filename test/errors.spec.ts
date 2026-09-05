@@ -16,6 +16,8 @@ import {
   LicenseKeyMissingError,
   SchemeNotSupportedError,
   DatasetInvalidError,
+  SigningKeyMissingError,
+  SecretKeyMissingError,
   ApiError,
   TamgaParseError,
 } from "../src/errors.js";
@@ -56,6 +58,57 @@ describe("parseApiErrors", () => {
     expect(() => parseApiErrors({ notErrors: [] })).toThrow(TamgaParseError);
     expect(() => parseApiErrors(null)).toThrow(TamgaParseError);
     expect(() => parseApiErrors("a string")).toThrow(TamgaParseError);
+  });
+
+  it("accepts a numeric status — the shape the API patch's 422s use", () => {
+    // Written as a JSON number on purpose; the pre-patch server sends "422".
+    const errors = parseApiErrors({
+      errors: [
+        {
+          id: "01926b3e-0000-7000-8000-000000000000",
+          status: 422,
+          code: "SIGNING_KEY_MISSING",
+          title: "Unprocessable Entity",
+          detail: "the account has no Ed25519 signing key",
+        },
+      ],
+    });
+    expect(errors).toEqual([
+      { status: 422, code: "SIGNING_KEY_MISSING", detail: "the account has no Ed25519 signing key" },
+    ]);
+  });
+
+  it("copies meta when it is a plain object and drops it otherwise", () => {
+    // The wire shape the API patch specifies on a same-license conflict:
+    // `status` is the JSON:API STRING "409", `meta.machineId` the holder.
+    const [named] = parseApiErrors({
+      errors: [
+        {
+          id: "e1",
+          status: "409",
+          code: "FINGERPRINT_TAKEN",
+          title: "Conflict",
+          detail: "already activated",
+          meta: { machineId: "m-existing" },
+        },
+      ],
+    });
+    expect(named?.meta).toEqual({ machineId: "m-existing" });
+
+    const [notAnObject] = parseApiErrors({
+      errors: [
+        {
+          id: "e1",
+          status: "409",
+          code: "FINGERPRINT_TAKEN",
+          title: "Conflict",
+          detail: "x",
+          meta: ["no"],
+        },
+      ],
+    });
+    expect(notAnObject?.meta).toBeUndefined();
+    expect("meta" in (notAnObject as object)).toBe(false);
   });
 });
 
@@ -102,6 +155,33 @@ describe("errorFromApiError", () => {
     expect(a.code).toBe(b.code);
     expect(a).toBeInstanceOf(NotFoundError);
     expect(b).toBeInstanceOf(NotFoundError);
+  });
+
+  it("maps the API patch's two new 422 codes", () => {
+    expect(errorFromApiError(build("SIGNING_KEY_MISSING"))).toBeInstanceOf(SigningKeyMissingError);
+    expect(errorFromApiError(build("SECRET_KEY_MISSING"))).toBeInstanceOf(SecretKeyMissingError);
+  });
+
+  it("exposes the conflicting machine id a FINGERPRINT_TAKEN names, and only a string one", () => {
+    const named = errorFromApiError({
+      status: 409,
+      code: "FINGERPRINT_TAKEN",
+      detail: "already activated",
+      meta: { machineId: "m-existing" },
+    }) as FingerprintTakenError;
+    expect(named).toBeInstanceOf(FingerprintTakenError);
+    expect(named.existingMachineId).toBe("m-existing");
+
+    const bare = errorFromApiError({ status: 409, code: "FINGERPRINT_TAKEN", detail: "elsewhere" });
+    expect((bare as FingerprintTakenError).existingMachineId).toBeUndefined();
+
+    const notAString = errorFromApiError({
+      status: 409,
+      code: "FINGERPRINT_TAKEN",
+      detail: "x",
+      meta: { machineId: 42 },
+    });
+    expect((notAString as FingerprintTakenError).existingMachineId).toBeUndefined();
   });
 });
 

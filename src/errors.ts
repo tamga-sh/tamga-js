@@ -44,11 +44,23 @@ export interface JsonApiErrorSource {
 /** A single JSON:API error object, as sent by the server. */
 export interface JsonApiErrorObject {
   id: string;
-  status: string;
+  /**
+   * JSON:API convention is a string (`"409"`). The API patch's new `422`s may
+   * put a JSON number here; {@link parseApiErrors} accepts both — hence the
+   * union rather than `string` alone, which would misdescribe a shape this
+   * same file's own parsing code already handles.
+   */
+  status: string | number;
   code: string;
   title: string;
   detail: string;
   source?: JsonApiErrorSource;
+  /**
+   * Per-error metadata. Today the only member: on `409 FINGERPRINT_TAKEN`,
+   * `{ "machineId": "<uuid>" }` — the machine already holding the
+   * fingerprint, present ONLY when it is on the license being activated.
+   */
+  meta?: Record<string, unknown>;
 }
 
 /** Top-level JSON:API error document: `{ "errors": [ ... ] }`. */
@@ -59,13 +71,15 @@ export interface JsonApiErrorDocument {
 /**
  * A single JSON:API error object as returned by the Tamga API, flattened
  * for SDK consumption. `status` is coerced to a `number`; `pointer` (if
- * present) is lifted out of the nested `source` object.
+ * present) is lifted out of the nested `source` object; `meta` is copied
+ * verbatim when the server sent a plain object.
  */
 export interface TamgaApiError {
   status: number;
   code: string;
   detail: string;
   pointer?: string;
+  meta?: Record<string, unknown>;
 }
 
 /**
@@ -185,6 +199,22 @@ export class FingerprintTakenError extends TamgaApiErrorException {
   constructor(apiError: TamgaApiError) {
     super(apiError, `fingerprint taken: ${apiError.detail}`);
     this.name = "FingerprintTakenError";
+  }
+
+  /**
+   * The id of the machine already holding the fingerprint, when the server
+   * named it (`meta.machineId`).
+   *
+   * The server names it ONLY when that machine is on the license being
+   * activated. A conflict raised by a wider `machine_uniqueness_strategy`
+   * against another license's machine carries no `meta`, and a pre-patch
+   * server never sends it — both read as `undefined`, and
+   * {@link import("./client.js").TamgaClient.activateMachine} then falls
+   * back to its license-scoped search.
+   */
+  get existingMachineId(): string | undefined {
+    const machineId = this.apiError.meta?.machineId;
+    return typeof machineId === "string" ? machineId : undefined;
   }
 }
 
@@ -407,6 +437,34 @@ export class LicenseNotAllowedError extends TamgaApiErrorException {
 }
 
 /**
+ * `422 SIGNING_KEY_MISSING` — the account has no Ed25519 signing key, so the
+ * server cannot sign what was asked of it. Reachable from `checkOutLicense`,
+ * `checkOutMachine` and `generateOfflineProof` (it was a `500` before the API
+ * patch). Not retryable: the key has to be provisioned. A post-patch server
+ * creates one with every account and backfills existing accounts at startup,
+ * so seeing this is a repair signal, not a routine outcome.
+ */
+export class SigningKeyMissingError extends TamgaApiErrorException {
+  static readonly CODE = "SIGNING_KEY_MISSING";
+  constructor(apiError: TamgaApiError) {
+    super(apiError, `signing key missing: ${apiError.detail}`);
+    this.name = "SigningKeyMissingError";
+  }
+}
+
+/**
+ * `422 SECRET_KEY_MISSING` — the account has no secret key, so the server
+ * cannot mint a token. Reachable from token minting only. Not retryable.
+ */
+export class SecretKeyMissingError extends TamgaApiErrorException {
+  static readonly CODE = "SECRET_KEY_MISSING";
+  constructor(apiError: TamgaApiError) {
+    super(apiError, `secret key missing: ${apiError.detail}`);
+    this.name = "SecretKeyMissingError";
+  }
+}
+
+/**
  * Fallback for any server-returned error `code` without a dedicated typed
  * subclass above — still carries the full {@link TamgaApiError}, so callers
  * can match on `.code` manually.
@@ -468,6 +526,10 @@ export function errorFromApiError(apiError: TamgaApiError): TamgaApiErrorExcepti
       return new LicenseExpiredError(apiError);
     case LicenseNotAllowedError.CODE:
       return new LicenseNotAllowedError(apiError);
+    case SigningKeyMissingError.CODE:
+      return new SigningKeyMissingError(apiError);
+    case SecretKeyMissingError.CODE:
+      return new SecretKeyMissingError(apiError);
     default:
       return new ApiError(apiError);
   }
@@ -476,8 +538,12 @@ export function errorFromApiError(apiError: TamgaApiError): TamgaApiErrorExcepti
 /**
  * Parses a JSON:API `{"errors": [...]}` response body into
  * `TamgaApiError[]`. Throws {@link TamgaParseError} if `body` isn't a valid
- * JSON:API error document shape (not JSON:API errors themselves — those are
- * represented in the returned array).
+ * JSON:API error document shape.
+ *
+ * `status` is accepted as the JSON:API string (`"422"`) or as a JSON number
+ * (`422`, the shape the API patch's new `422`s use). Refusing the number
+ * failed the whole document and turned a perfectly good `code` into
+ * `UNKNOWN` (D18). `meta` is copied when it is a plain object.
  */
 export function parseApiErrors(body: unknown): TamgaApiError[] {
   if (
@@ -490,22 +556,40 @@ export function parseApiErrors(body: unknown): TamgaApiError[] {
   }
 
   const doc = body as JsonApiErrorDocument;
-  return doc.errors.map((err) => {
-    if (
-      typeof err.status !== "string" ||
-      typeof err.code !== "string" ||
-      typeof err.detail !== "string"
-    ) {
+  return doc.errors.map((raw) => {
+    const err = raw as {
+      status?: unknown;
+      code?: unknown;
+      detail?: unknown;
+      source?: JsonApiErrorSource;
+      meta?: unknown;
+    };
+    let status: number;
+    if (typeof err.status === "string") {
+      status = Number.parseInt(err.status, 10);
+    } else if (typeof err.status === "number") {
+      status = err.status;
+    } else {
+      throw new TamgaParseError("malformed JSON:API error object");
+    }
+    if (typeof err.code !== "string" || typeof err.detail !== "string") {
       throw new TamgaParseError("malformed JSON:API error object");
     }
     const pointer = err.source?.pointer;
+    const meta = isPlainObject(err.meta) ? err.meta : undefined;
     return {
-      status: Number.parseInt(err.status, 10),
+      status,
       code: err.code,
       detail: err.detail,
       ...(pointer !== undefined ? { pointer } : {}),
+      ...(meta !== undefined ? { meta } : {}),
     };
   });
+}
+
+/** `typeof null === "object"` and so is an array; neither is a `meta`. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**
@@ -529,6 +613,34 @@ export class CheckoutError extends TamgaError {
       | "ttl-out-of-range"
       | "expired"
       | "crypto",
+    /**
+     * For `kind === "crypto"` only — which check failed. Added in 0.4.4 as an
+     * optional property so the `kind` union stays closed for exhaustive
+     * `switch` consumers.
+     *
+     * - `"signature"`: no trusted key verified the signature over `enc`. A
+     *   forgery or an altered file, or (single-key entry points only) the
+     *   wrong public key.
+     * - `"decryption"`: the signature verified and AES-GCM then refused the
+     *   ciphertext. `enc` is inside the signature that just passed, but `alg`
+     *   is **not** — only `enc`'s string bytes are signed. For a **machine
+     *   file** this is still a sound guarantee: it can only mean the wrong
+     *   license key (or the wrong fingerprint) — not tampering. For a
+     *   **license file** it is not: an attacker can flip a verified plain
+     *   file's `alg` from `"base64+ed25519+v2"` to
+     *   `"aes-256-gcm+ed25519+v2"` without touching `enc`, and the signature
+     *   still verifies — `decodeLicenseFilePlaintext` then reads the
+     *   authentic plaintext as `nonce‖ciphertext‖tag` and AES-GCM decryption
+     *   fails, producing this same `reason: "decryption"` even with the
+     *   correct license key. The guarantee holds only when `alg` itself is
+     *   trusted (e.g. read from a source the caller controls), not merely
+     *   because the file verified.
+     *
+     * `undefined` on every other kind, and on the structural `"crypto"`
+     * failures that are neither (a malformed encrypted-payload framing, a
+     * public key of the wrong length, a payload too short to hold a tag).
+     */
+    readonly reason?: "signature" | "decryption",
   ) {
     super(message);
     this.name = "CheckoutError";
@@ -588,8 +700,8 @@ export class CheckoutError extends TamgaError {
     return new CheckoutError(`ttl out of range: ${detail}`, "ttl-out-of-range");
   }
 
-  static cryptoFailure(detail: string): CheckoutError {
-    return new CheckoutError(detail, "crypto");
+  static cryptoFailure(detail: string, reason?: "signature" | "decryption"): CheckoutError {
+    return new CheckoutError(detail, "crypto", reason);
   }
 }
 
@@ -612,7 +724,11 @@ export class CheckoutError extends TamgaError {
  * - `"no-published-signing-key"` → the account published no Ed25519 key at all,
  *   so the server signed with the empty string. No client-side action fixes
  *   this; it is an account-configuration problem. See
- *   {@link import("./crypto/keyId.js").UNBACKFILLED_ACCOUNT_KEY_ID}.
+ *   {@link import("./crypto/keyId.js").UNBACKFILLED_ACCOUNT_KEY_ID}. A
+ *   pre-patch server stamped this on every file of an account whose key was
+ *   never backfilled; the API patch creates a key with every account and
+ *   repairs the public half at startup, so only files issued before it carry
+ *   this `kid`.
  * - `"invalid-key"` → a key handed to
  *   {@link import("./checkout/keySet.js").SigningKeySet.fromPublicKeys} is not
  *   standard base64 of exactly 32 bytes. Raised eagerly, at construction, so a

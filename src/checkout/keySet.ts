@@ -18,23 +18,22 @@
  *
  * ## How the `kid` is used, and why that is safe
  *
- * The `kid` claim lives *inside* the signed payload but is read *before* the
- * signature is checked, which is sound under one rule, and only that rule: it
- * **selects** a key from a set the caller already trusts, and can never
- * **supply** one. A file naming a `kid` this set does not hold is a
- * {@link import("../errors.js").SigningKeyError}; a file naming one it does
- * hold is verified against exactly that key and nothing else.
- *
- * There is deliberately **no "try every key" fallback**. Trying them all would
- * verify the same set of files while destroying the very distinction this
- * module exists for — an unknown-key failure and a forgery would again be
- * indistinguishable, which is the defect, not the fix.
- *
- * This is the same discipline JWS `kid` handling needs, and it is why a
- * `SigningKeySet` can only be built from keys the caller supplies: from the
- * account's published key set
- * ({@link import("../client.js").TamgaClient.getSigningKeySet}) or from public
- * keys embedded in the application binary ({@link SigningKeySet.fromPublicKeys}).
+ * Every key the set holds is tried against the signature over `enc`'s base64
+ * string **before a single byte of `enc` is decoded**, so the only bytes that
+ * reach a decoder, a cipher or the JSON parser on the success path are bytes a
+ * trusted key has already vouched for. The `kid` claim is read only afterwards,
+ * and only when no key verified, to label the failure: a `kid` the set holds
+ * means a forgery (`CheckoutError` `"crypto"`/`reason: "signature"`); a `kid`
+ * it does not hold means a set that has not caught up with a rotation
+ * ({@link import("../errors.js").SigningKeyError}). The distinction this module
+ * exists for survives because the `kid` still decides the label; what changed
+ * in 0.4.4 is that a file no longer chooses which key its signature is checked
+ * against, and no unverified ciphertext is decrypted except to read that one
+ * claim. Trying every key is sound because a `SigningKeySet` can only be built
+ * from keys the caller supplies — the account's published key set
+ * ({@link import("../client.js").TamgaClient.getSigningKeySet}) or public keys
+ * embedded in the application binary ({@link SigningKeySet.fromPublicKeys}) —
+ * never from anything the file carries.
  *
  * ## Ed25519 only
  *
@@ -46,6 +45,7 @@
  */
 
 import { CheckoutError, SigningKeyError } from "../errors.js";
+import { verifyEd25519 } from "../crypto/ed25519.js";
 import {
   signingKeyId,
   SIGNING_KEY_ID_LENGTH,
@@ -276,7 +276,8 @@ export function isWellFormedKeyId(keyId: string): boolean {
 }
 
 /**
- * Reads **only** the `kid` claim out of not-yet-verified payload bytes.
+ * Reads **only** the `kid` claim out of payload bytes — unverified ones when
+ * labelling a failure, verified ones when asserting a v2 file names its key.
  *
  * Deliberately a minimal probe rather than a full payload parse: the one value
  * taken from unverified bytes should be the one value needed to pick a key, and
@@ -316,36 +317,77 @@ export function probeKeyIdClaim(plaintext: Uint8Array): string {
 }
 
 /**
- * Selects the trusted public key an offline file's `kid` claim names.
+ * Tries every key the set holds against `signature` over `message`, returning
+ * the first that verifies, or `undefined` when none does.
  *
- * The three outcomes a caller has to be able to tell apart all originate here:
- *
- * - the `kid` is in the set → that key, and only that key, is returned;
- * - the `kid` is `SHA-256("")` and the set does not hold it → the issuing
- *   account published no Ed25519 key at all, and no key set will ever verify
- *   the file (`"no-published-signing-key"`);
- * - otherwise → `"unknown-key-id"`, which almost always means a key set that
- *   predates a rotation.
- *
- * The set is consulted **before** the empty-key special case, so a set that
- * genuinely holds that id still wins. The special case only refines the message
- * on a lookup that was going to fail anyway; it never rejects a key the caller
- * supplied.
+ * This runs BEFORE a single byte of `enc` is decoded, so on the success path
+ * nothing attacker-chosen ever reaches a decoder, a cipher or the JSON parser.
+ * It is sound because a set can only be built from keys the caller supplies,
+ * never from anything the file carries.
  *
  * Not part of the public surface — an internal helper for
  * `src/checkout/licenseFile.ts` and `src/checkout/machineFile.ts`.
  */
-export function selectSigningKey(
-  plaintext: Uint8Array,
+export function findVerifyingKey(
   keySet: SigningKeySet,
-): { keyId: string; publicKey: Uint8Array } {
-  const keyId = probeKeyIdClaim(plaintext);
-
-  const publicKey = keySet.find(keyId);
-  if (publicKey !== undefined) return { keyId, publicKey };
-
-  if (keyId === UNBACKFILLED_ACCOUNT_KEY_ID) {
-    throw SigningKeyError.noPublishedSigningKey(keyId);
+  message: Uint8Array,
+  signature: Uint8Array,
+): Uint8Array | undefined {
+  for (const keyId of keySet.keyIds) {
+    const publicKey = keySet.find(keyId);
+    if (publicKey !== undefined && verifyEd25519(message, signature, publicKey)) return publicKey;
   }
-  throw SigningKeyError.unknownKeyId(keyId);
+  return undefined;
+}
+
+/**
+ * Labels a signature that no held key verified, from the `kid` the
+ * still-unverified payload names.
+ *
+ * `decode` opens `enc` — and, when encrypted, decrypts it — ONLY so `meta.kid`
+ * can be read; nothing else is taken from those bytes. The outcomes:
+ *
+ * - the `kid` is held → `CheckoutError` `"crypto"`/`"signature"`: the file
+ *   names a key we have and that key did not sign it. A forgery.
+ * - the `kid` is `SHA-256("")` → `"no-published-signing-key"`; otherwise not
+ *   held → `"unknown-key-id"`: a stale set, not a forgery.
+ * - the payload cannot be decoded, decrypted or parsed, or names no usable
+ *   `kid` → `"crypto"`/`"signature"`: with nothing to label it by, the
+ *   signature failure stands.
+ * - a missing license key or fingerprint → that `CheckoutError`, unchanged: a
+ *   missing argument is the caller's to fix, and hiding it behind a signature
+ *   verdict would send them chasing keys.
+ *
+ * Returned rather than thrown so the caller can `throw await` it in one
+ * expression. Not part of the public surface.
+ */
+export async function labelKeySetFailure(
+  keySet: SigningKeySet,
+  decode: () => Promise<Uint8Array>,
+): Promise<CheckoutError | SigningKeyError> {
+  const signatureFailure = (): CheckoutError =>
+    CheckoutError.cryptoFailure("signature verification failed", "signature");
+
+  let plaintext: Uint8Array;
+  try {
+    plaintext = await decode();
+  } catch (error) {
+    if (
+      error instanceof CheckoutError &&
+      (error.kind === "license-key-missing" || error.kind === "fingerprint-missing")
+    ) {
+      return error;
+    }
+    return signatureFailure();
+  }
+
+  let keyId: string;
+  try {
+    keyId = probeKeyIdClaim(plaintext);
+  } catch {
+    return signatureFailure();
+  }
+  if (keySet.has(keyId)) return signatureFailure();
+  if (keyId === UNBACKFILLED_ACCOUNT_KEY_ID) return SigningKeyError.noPublishedSigningKey(keyId);
+  return SigningKeyError.unknownKeyId(keyId);
 }

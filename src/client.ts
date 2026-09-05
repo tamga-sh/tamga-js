@@ -34,7 +34,12 @@ import {
   type AuthCredentials,
   type TransportConfig,
 } from "./transport.js";
-import { FingerprintTakenError, TamgaApiErrorException, TamgaParseError } from "./errors.js";
+import {
+  FingerprintTakenError,
+  NotFoundError,
+  TamgaApiErrorException,
+  TamgaParseError,
+} from "./errors.js";
 import type { License, LicenseScope } from "./models/license.js";
 import type { Entitlement } from "./models/license.js";
 import type { LicenseValidationResult, ValidationCode, ValidationResult } from "./models/validation.js";
@@ -348,6 +353,18 @@ const CREATE_LIMIT_CODE_TO_VALIDATION_CODE: Readonly<Record<string, ValidationCo
   MEMORY_LIMIT_EXCEEDED: "TOO_MUCH_MEMORY",
   DISK_LIMIT_EXCEEDED: "TOO_MUCH_DISK",
 };
+
+/**
+ * Guards {@link TamgaClient.adoptConflictingMachine}'s fast path:
+ * `existingMachineId` comes from `error.meta.machineId` — server-supplied,
+ * but not otherwise validated before it lands in `getMachine`'s
+ * `path: /machines/${machineId}`. An allowlist of the characters a real
+ * machine id can hold (alphanumeric, `-`, `_`, capped at a generous length)
+ * is safer than denylisting `/`/`..`: it also rejects `?`/`#`/whitespace/
+ * control characters that could reshape the request in other ways, while
+ * still accepting both a UUID and any other simple id scheme.
+ */
+const SAFE_MACHINE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
 /**
  * Returns the validate-time {@link ValidationCode} equivalent to `error`'s
@@ -940,9 +957,10 @@ export class TamgaClient {
    * survived.
    *
    * With `reuseExistingMachine: true` the conflict is resolved instead of
-   * thrown: the existing machine is looked up with
-   * {@link findMachineByFingerprint}, validation proceeds as normal, and the
-   * machine comes back on
+   * thrown: the existing machine is adopted — from the `meta.machineId` a
+   * post-patch server puts on the `409` (one `GET`, and only when the machine
+   * is on this license), otherwise through {@link findMachineByFingerprint} —
+   * validation proceeds as normal, and the machine comes back on
    * {@link import("./models/validation.js").ValidationResult.machine}. The call
    * becomes idempotent — running it twice yields the same machine and the same
    * verdict, and burns no second seat.
@@ -951,14 +969,14 @@ export class TamgaClient {
    * conflict path and, more importantly, because "reuse" is a decision about
    * seat accounting that belongs to the caller.
    *
-   * ⚠️ The lookup is confined to `licenseId`, and a miss re-throws the original
-   * `FingerprintTakenError` rather than widening. The conflict's scope is the
-   * policy's `machine_uniqueness_strategy`, which defaults to per-license but
-   * can be `UNIQUE_PER_POLICY` or `UNIQUE_PER_ACCOUNT` — under those, the
-   * machine holding the fingerprint may sit on a **different** license, and
-   * this license really has not been activated. Since the `machines` resource
-   * does not serialize `license_id`, a machine found outside the filter could
-   * not be shown to belong here anyway.
+   * ⚠️ Without `meta`, the lookup is confined to `licenseId`, and a miss
+   * re-throws the original `FingerprintTakenError` rather than widening. The
+   * conflict's scope is the policy's `machine_uniqueness_strategy`, which
+   * defaults to per-license but can be `UNIQUE_PER_POLICY` or
+   * `UNIQUE_PER_ACCOUNT` — under those, the machine holding the fingerprint
+   * may sit on a **different** license, and this license really has not been
+   * activated. Since the `machines` resource does not serialize `license_id`, a
+   * machine found outside the filter could not be shown to belong here anyway.
    *
    * ## The machine on the result
    *
@@ -996,7 +1014,7 @@ export class TamgaClient {
       // silently outlive any change to it.
       if (!(error instanceof TamgaApiErrorException)) throw error;
       if (reuseExistingMachine && error instanceof FingerprintTakenError) {
-        machine = await this.findMachineByFingerprint(licenseId, fingerprint);
+        machine = await this.adoptConflictingMachine(licenseId, fingerprint, error);
         // Not on this license. The conflict came from a wider uniqueness
         // scope (`UNIQUE_PER_POLICY`/`UNIQUE_PER_ACCOUNT`), so the machine
         // holding the fingerprint belongs to some *other* license and this
@@ -1032,6 +1050,50 @@ export class TamgaClient {
     }
 
     return machine !== undefined ? { ...result, machine } : result;
+  }
+
+  /**
+   * Resolves a `FINGERPRINT_TAKEN` conflict to the machine holding the
+   * fingerprint on `licenseId`, or `undefined` when it is not on this license.
+   *
+   * Fast path first: a post-patch server names the machine in
+   * `meta.machineId`, and does so ONLY when it is on the requested license —
+   * the one fact the scoped search existed to establish. But {@link getMachine}
+   * itself is **not** license-scoped (see its own doc comment — any credential
+   * can read any machine in the account), so this path only trusts what comes
+   * back after re-checking `attributes.fingerprint` against the fingerprint
+   * this call actually activated. A mismatch is treated exactly like "no
+   * `meta` at all" and falls through to the scoped search below, rather than
+   * handing back a machine the conflict never actually named.
+   *
+   * `existingMachineId` is also shape-checked with
+   * {@link SAFE_MACHINE_ID_PATTERN} before it is interpolated into
+   * `getMachine`'s request path — it is server-supplied, but treating it as a
+   * trusted path segment with no validation would let a malformed value
+   * (e.g. containing `/` or `..`) reshape the request. A value that fails the
+   * check is likewise treated as absent, and no request is made with it.
+   *
+   * Without a usable `meta.machineId` (a pre-patch server, a cross-license
+   * conflict, a malformed id, or a fingerprint mismatch), or when the named
+   * machine has since vanished (`404`), the license-scoped
+   * {@link findMachineByFingerprint} decides, exactly as before. Any other
+   * failure of the `GET` propagates.
+   */
+  private async adoptConflictingMachine(
+    licenseId: string,
+    fingerprint: string,
+    conflict: FingerprintTakenError,
+  ): Promise<Machine | undefined> {
+    const existingMachineId = conflict.existingMachineId;
+    if (existingMachineId !== undefined && SAFE_MACHINE_ID_PATTERN.test(existingMachineId)) {
+      try {
+        const machine = await this.getMachine(existingMachineId);
+        if (machine.attributes.fingerprint === fingerprint) return machine;
+      } catch (error) {
+        if (!(error instanceof NotFoundError)) throw error;
+      }
+    }
+    return this.findMachineByFingerprint(licenseId, fingerprint);
   }
 
   /** `POST /machines/{machine_id}/actions/ping-heartbeat` — no body, sets `last_heartbeat_at = now`. */
