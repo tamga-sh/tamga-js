@@ -34,7 +34,12 @@ import {
   type AuthCredentials,
   type TransportConfig,
 } from "./transport.js";
-import { FingerprintTakenError, TamgaApiErrorException, TamgaParseError } from "./errors.js";
+import {
+  FingerprintTakenError,
+  NotFoundError,
+  TamgaApiErrorException,
+  TamgaParseError,
+} from "./errors.js";
 import type { License, LicenseScope } from "./models/license.js";
 import type { Entitlement } from "./models/license.js";
 import type { LicenseValidationResult, ValidationCode, ValidationResult } from "./models/validation.js";
@@ -940,9 +945,10 @@ export class TamgaClient {
    * survived.
    *
    * With `reuseExistingMachine: true` the conflict is resolved instead of
-   * thrown: the existing machine is looked up with
-   * {@link findMachineByFingerprint}, validation proceeds as normal, and the
-   * machine comes back on
+   * thrown: the existing machine is adopted — from the `meta.machineId` a
+   * post-patch server puts on the `409` (one `GET`, and only when the machine
+   * is on this license), otherwise through {@link findMachineByFingerprint} —
+   * validation proceeds as normal, and the machine comes back on
    * {@link import("./models/validation.js").ValidationResult.machine}. The call
    * becomes idempotent — running it twice yields the same machine and the same
    * verdict, and burns no second seat.
@@ -951,14 +957,14 @@ export class TamgaClient {
    * conflict path and, more importantly, because "reuse" is a decision about
    * seat accounting that belongs to the caller.
    *
-   * ⚠️ The lookup is confined to `licenseId`, and a miss re-throws the original
-   * `FingerprintTakenError` rather than widening. The conflict's scope is the
-   * policy's `machine_uniqueness_strategy`, which defaults to per-license but
-   * can be `UNIQUE_PER_POLICY` or `UNIQUE_PER_ACCOUNT` — under those, the
-   * machine holding the fingerprint may sit on a **different** license, and
-   * this license really has not been activated. Since the `machines` resource
-   * does not serialize `license_id`, a machine found outside the filter could
-   * not be shown to belong here anyway.
+   * ⚠️ Without `meta`, the lookup is confined to `licenseId`, and a miss
+   * re-throws the original `FingerprintTakenError` rather than widening. The
+   * conflict's scope is the policy's `machine_uniqueness_strategy`, which
+   * defaults to per-license but can be `UNIQUE_PER_POLICY` or
+   * `UNIQUE_PER_ACCOUNT` — under those, the machine holding the fingerprint
+   * may sit on a **different** license, and this license really has not been
+   * activated. Since the `machines` resource does not serialize `license_id`, a
+   * machine found outside the filter could not be shown to belong here anyway.
    *
    * ## The machine on the result
    *
@@ -996,7 +1002,7 @@ export class TamgaClient {
       // silently outlive any change to it.
       if (!(error instanceof TamgaApiErrorException)) throw error;
       if (reuseExistingMachine && error instanceof FingerprintTakenError) {
-        machine = await this.findMachineByFingerprint(licenseId, fingerprint);
+        machine = await this.adoptConflictingMachine(licenseId, fingerprint, error);
         // Not on this license. The conflict came from a wider uniqueness
         // scope (`UNIQUE_PER_POLICY`/`UNIQUE_PER_ACCOUNT`), so the machine
         // holding the fingerprint belongs to some *other* license and this
@@ -1032,6 +1038,34 @@ export class TamgaClient {
     }
 
     return machine !== undefined ? { ...result, machine } : result;
+  }
+
+  /**
+   * Resolves a `FINGERPRINT_TAKEN` conflict to the machine holding the
+   * fingerprint on `licenseId`, or `undefined` when it is not on this license.
+   *
+   * Fast path first: a post-patch server names the machine in
+   * `meta.machineId`, and does so ONLY when it is on the requested license —
+   * the one fact the scoped search existed to establish — so a single
+   * {@link getMachine} adopts it. Without `meta` (a pre-patch server, or a
+   * cross-license conflict), or when the named machine has since vanished
+   * (`404`), the license-scoped {@link findMachineByFingerprint} decides,
+   * exactly as before. Any other failure of the `GET` propagates.
+   */
+  private async adoptConflictingMachine(
+    licenseId: string,
+    fingerprint: string,
+    conflict: FingerprintTakenError,
+  ): Promise<Machine | undefined> {
+    const existingMachineId = conflict.existingMachineId;
+    if (existingMachineId !== undefined) {
+      try {
+        return await this.getMachine(existingMachineId);
+      } catch (error) {
+        if (!(error instanceof NotFoundError)) throw error;
+      }
+    }
+    return this.findMachineByFingerprint(licenseId, fingerprint);
   }
 
   /** `POST /machines/{machine_id}/actions/ping-heartbeat` — no body, sets `last_heartbeat_at = now`. */
