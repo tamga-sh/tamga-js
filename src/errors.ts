@@ -620,9 +620,19 @@ export class CheckoutError extends TamgaError {
      *   forgery or an altered file, or (single-key entry points only) the
      *   wrong public key.
      * - `"decryption"`: the signature verified and AES-GCM then refused the
-     *   ciphertext. `enc` is inside the signature that just passed, so this
-     *   can only mean the wrong license key (or, for a machine file, the wrong
-     *   fingerprint) — not tampering.
+     *   ciphertext. `enc` is inside the signature that just passed, but `alg`
+     *   is **not** — only `enc`'s string bytes are signed. For a **machine
+     *   file** this is still a sound guarantee: it can only mean the wrong
+     *   license key (or the wrong fingerprint) — not tampering. For a
+     *   **license file** it is not: an attacker can flip a verified plain
+     *   file's `alg` from `"base64+ed25519+v2"` to
+     *   `"aes-256-gcm+ed25519+v2"` without touching `enc`, and the signature
+     *   still verifies — `decodeLicenseFilePlaintext` then reads the
+     *   authentic plaintext as `nonce‖ciphertext‖tag` and AES-GCM decryption
+     *   fails, producing this same `reason: "decryption"` even with the
+     *   correct license key. The guarantee holds only when `alg` itself is
+     *   trusted (e.g. read from a source the caller controls), not merely
+     *   because the file verified.
      *
      * `undefined` on every other kind, and on the structural `"crypto"`
      * failures that are neither (a malformed encrypted-payload framing, a

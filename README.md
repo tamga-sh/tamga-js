@@ -328,8 +328,12 @@ Three things about this are deliberate and worth knowing before you build on it:
 - **Every held key is tried against the signature before a byte of the file is
   decoded.** The `kid` is read afterwards, only to label a failure: not held →
   `SigningKeyError`; held → `CheckoutError` `"crypto"` with `reason:
-  "signature"`. Once a signature has verified, `reason: "decryption"` can only
-  mean the wrong license key.
+  "signature"`. Once a signature has verified, `reason: "decryption"` usually
+  means the wrong license key — except that `alg` is **not** covered by the
+  signature, so a verified license file whose `alg` was flipped from the
+  plain to the encrypted variant produces the same `reason: "decryption"`
+  even with the correct key. Trust `alg` only when it comes from a source you
+  control, not merely because the file verified.
 - **`SigningKeyError` has a third kind, `"no-published-signing-key"`.** The
   server signs with `ed25519_public_key.unwrap_or_default()`, so an account whose
   key was never published signs every file with the `kid` of the empty string.

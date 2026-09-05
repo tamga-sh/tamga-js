@@ -314,7 +314,11 @@ export async function verifyLicenseFileWithClaims(
  * verifies, `enc` is decoded — and, when encrypted, decrypted under the
  * license key — solely to read `meta.kid` and label the failure. Once a
  * signature has verified, a `"crypto"` failure with `reason: "decryption"`
- * can only mean the wrong license key.
+ * usually means the wrong license key — but not always: `alg` is not covered
+ * by the signature, so a verified file whose `alg` was flipped from the plain
+ * to the encrypted variant produces this same reason even with the correct
+ * key. See {@link import("../errors.js").CheckoutError}'s `reason` doc
+ * comment for the full explanation.
  */
 export async function verifyLicenseFileWithKeySet(
   pem: string,
