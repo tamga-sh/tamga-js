@@ -296,6 +296,26 @@ describe("a payload with no usable kid claim", () => {
       /pre-v2 file/,
     );
   });
+
+  it("no usable kid AND no held key verifying it → labelKeySetFailure's own catch, not a plain signature mismatch", async () => {
+    // Every case above signs with a key that IS in the set, so the signature
+    // verifies and `probeKeyIdClaim` runs on the SUCCESS path, straight out of
+    // `licenseFile.ts`. This one signs with a key the set does NOT hold, so no
+    // held key verifies the signature and `labelKeySetFailure` runs instead —
+    // its own `probeKeyIdClaim` call sees the same missing `kid` and, with
+    // nothing to label the failure by, the signature failure stands.
+    const signer = signingKeypair();
+    const untrusted = signingKeypair();
+    const payload = JSON.parse(licensePayloadJsonWithKid("x")) as { meta: Record<string, unknown> };
+    delete payload.meta.kid;
+    const pem = await buildLicensePem(JSON.stringify(payload), signer.secretKey);
+    const keySet = SigningKeySet.fromPublicKeys([untrusted.publicKeyB64]);
+
+    await expect(verifyLicenseFileWithKeySet(pem, keySet, undefined, ISSUED_AT)).rejects.toMatchObject({
+      kind: "crypto",
+      reason: "signature",
+    });
+  });
 });
 
 describe("machine files through a key set", () => {
