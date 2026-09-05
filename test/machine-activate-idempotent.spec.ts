@@ -170,6 +170,47 @@ describe("activateMachine with reuseExistingMachine", () => {
     expect(url.searchParams.has("filter[license]")).toBe(false);
   });
 
+  it("falls back to the scoped search when the named machine's fingerprint does not match", async () => {
+    // `getMachine` is NOT license-scoped (see its own doc comment — any
+    // credential can read any machine in the account), so a mismatched
+    // fingerprint means the GET answered with some other machine entirely,
+    // and the fast path must not adopt it.
+    const wrongFingerprintMachine = {
+      id: "m-wrong",
+      type: "machines",
+      attributes: { fingerprint: "not-fp-1" },
+    };
+    const foundBySearch = { id: "m-found", type: "machines", attributes: { fingerprint: "fp-1" } };
+    const fetchMock = mockSequence(
+      fingerprintTakenNaming("m-wrong"),
+      jsonApi({ data: wrongFingerprintMachine }),
+      machinePage(foundBySearch),
+      validation("VALID"),
+    );
+
+    const result = await client().activateMachine("lic-1", "fp-1", {}, undefined, false, true);
+
+    expect(result.machine?.id).toBe("m-found");
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(nthCall(fetchMock, 2)[0].searchParams.get("filter[license]")).toBe("lic-1");
+  });
+
+  it("falls back to the scoped search, without ever sending it as a path segment, when meta.machineId is malformed/traversal-shaped", async () => {
+    const fetchMock = mockSequence(
+      fingerprintTakenNaming("../../etc/passwd"),
+      machinePage(existingMachine),
+      validation("VALID"),
+    );
+
+    const result = await client().activateMachine("lic-1", "fp-1", {}, undefined, false, true);
+
+    expect(result.machine?.id).toBe("m-existing");
+    // Only 3 calls total: the conflict, the scoped search, and validate — no
+    // GET was attempted with the malformed id as a path segment.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(nthCall(fetchMock, 1)[0].searchParams.get("filter[license]")).toBe("lic-1");
+  });
+
   it("falls back to the scoped search when the named machine is gone", async () => {
     // The id the server named can vanish between the 409 and the GET.
     const fetchMock = mockSequence(

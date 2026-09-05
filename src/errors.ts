@@ -46,9 +46,11 @@ export interface JsonApiErrorObject {
   id: string;
   /**
    * JSON:API convention is a string (`"409"`). The API patch's new `422`s may
-   * put a JSON number here; {@link parseApiErrors} accepts both.
+   * put a JSON number here; {@link parseApiErrors} accepts both — hence the
+   * union rather than `string` alone, which would misdescribe a shape this
+   * same file's own parsing code already handles.
    */
-  status: string;
+  status: string | number;
   code: string;
   title: string;
   detail: string;
