@@ -3,11 +3,13 @@
  *
  * `ValidationCode` models all 24 wire values documented in the Tamga API
  * protocol specification §2, evaluated server-side in priority order on the
- * by-ID endpoint. Sixteen are currently reachable; the other eight are
- * declared in the server's enum but never emitted (see that specification's
- * Known Server-Side Gaps #4). The unreachable ones are still modeled here for
- * forward-compatibility: a server-side fix that wires one of them up should
- * not require an SDK type change.
+ * by-ID endpoint. Nineteen are reachable; the other five (`NOT_FOUND`,
+ * `BANNED`, `COMPONENTS_SCOPE_MISMATCH`, `CHECKSUM_SCOPE_MISMATCH`,
+ * `VERSION_SCOPE_MISMATCH`) are declared in the server's enum but never
+ * emitted (see that specification's Known Server-Side Gaps #4). The
+ * unreachable ones are still modeled here for forward-compatibility: a
+ * server-side fix that wires one of them up should not require an SDK type
+ * change.
  *
  * ⚠️ `ENTITLEMENTS_MISSING` and `FINGERPRINT_SCOPE_MISMATCH` **are reachable**
  * — they left the unreachable set when the server started genuinely enforcing
@@ -44,13 +46,17 @@ export type ValidationCode =
   // these — see `LicenseScope` in `./license.ts`.
   | "ENTITLEMENTS_MISSING"
   | "FINGERPRINT_SCOPE_MISMATCH"
-  // Modeled but not reachable via this field today — see the Tamga API
-  // protocol specification §2.
+  // Also reachable since the API patch: `TOO_MANY_USERS` on every validate
+  // endpoint (`users > max_users`); the two `HEARTBEAT_*` codes when
+  // `scope.fingerprint` is set and the policy has `require_heartbeat`.
+  | "TOO_MANY_USERS"
+  | "HEARTBEAT_NOT_STARTED"
+  | "HEARTBEAT_DEAD"
+  // Modeled but not reachable via this field today: NOT_FOUND short-circuits
+  // to HTTP 404, BANNED has no feature behind it, COMPONENTS has no scope
+  // field, and the last two are refused with 422 SCOPE_NOT_SUPPORTED first.
   | "NOT_FOUND"
   | "BANNED"
-  | "TOO_MANY_USERS"
-  | "HEARTBEAT_DEAD"
-  | "HEARTBEAT_NOT_STARTED"
   | "COMPONENTS_SCOPE_MISMATCH"
   | "CHECKSUM_SCOPE_MISMATCH"
   | "VERSION_SCOPE_MISMATCH"
