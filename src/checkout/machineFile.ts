@@ -101,7 +101,7 @@ import { deriveHkdfKey, MACHINE_FILE_KEY_SALT } from "../crypto/hkdf.js";
 import { decryptAesGcm } from "../crypto/aesGcm.js";
 import { base64Decode } from "../internal/base64.js";
 import { CLOCK_SKEW_TOLERANCE_SECONDS } from "./licenseFile.js";
-import { selectSigningKey, type SigningKeySet } from "./keySet.js";
+import { findVerifyingKey, labelKeySetFailure, probeKeyIdClaim, type SigningKeySet } from "./keySet.js";
 import type { LicenseFileClaims } from "./licenseFile.js";
 import type { Machine } from "../models/machine.js";
 import type { LicenseScheme } from "../models/policy.js";
@@ -418,7 +418,7 @@ export async function verifyMachineFileWithClaims(
 
   const verified = await verifySignatureForScheme(scheme, encStringBytes, sigBytes, publicKey);
   if (!verified) {
-    throw CheckoutError.cryptoFailure("signature verification failed");
+    throw CheckoutError.cryptoFailure("signature verification failed", "signature");
   }
 
   const plaintext = await decodeMachineFilePlaintext(cert, encoding, keyMaterial);
@@ -430,10 +430,11 @@ export async function verifyMachineFileWithClaims(
  * file's own `kid` claim from a set of keys the caller already trusts.
  *
  * Same rotation defect and the same two distinct outcomes as
- * {@link import("./licenseFile.js").verifyLicenseFileWithKeySet}: an unknown
- * `kid` is a {@link import("../errors.js").SigningKeyError} (a stale key set),
- * while a known `kid` whose signature then fails stays a
- * {@link import("../errors.js").CheckoutError} of kind `"crypto"` (a forgery).
+ * {@link import("./licenseFile.js").verifyLicenseFileWithKeySet}: no held key
+ * verifies and the `kid` is unknown → {@link import("../errors.js").SigningKeyError}
+ * (a stale key set); no held key verifies and the `kid` is held →
+ * {@link import("../errors.js").CheckoutError} `"crypto"`/`reason: "signature"`
+ * (a forgery).
  *
  * ⚠️ **Ed25519-signed machine files only, and that is a server-side limit
  * rather than a shortcut here.** There is no `scheme` parameter because a key
@@ -451,12 +452,10 @@ export async function verifyMachineFileWithClaims(
  * accept that a rotation is not a distinguishable outcome for them.
  *
  * `keyMaterial` is required only for an encrypted file, and `meta.exp` is
- * enforced, both exactly as in {@link verifyMachineFileWithClaims}. The same
- * ordering caveat applies as on the license-file path: the `kid` lives inside
- * `enc`, so `enc` is decoded — and, when encrypted, decrypted — before the
- * signature is checked. See
- * {@link import("./licenseFile.js").verifyLicenseFileWithKeySet} for why that
- * is safe.
+ * enforced, both exactly as in {@link verifyMachineFileWithClaims}. Every held
+ * key is tried before either half of `enc` is decoded; after a verified
+ * signature, `reason: "decryption"` can only mean the wrong license key or
+ * fingerprint.
  */
 export async function verifyMachineFileWithKeySet(
   pem: string,
@@ -471,7 +470,7 @@ export async function verifyMachineFileWithKeySet(
 
   // Not a cross-check against a caller-supplied scheme, as in
   // `verifyMachineFileWithClaims`, but a hard restriction: the key set holds
-  // Ed25519 keys, and nothing else can be resolved from a `kid`.
+  // Ed25519 keys, and nothing else can be tried against the signature.
   const expectedSuffix = schemeAlgSuffix("ED25519_SIGN");
   if (suffix !== expectedSuffix) {
     throw CheckoutError.unsupportedAlgorithm(
@@ -479,24 +478,25 @@ export async function verifyMachineFileWithKeySet(
     );
   }
 
-  const plaintext = await decodeMachineFilePlaintext(cert, encoding, keyMaterial);
-
-  // Throws a typed SigningKeyError for an unknown or empty-account `kid` —
-  // deliberately not the error a forgery produces.
-  const { publicKey } = selectSigningKey(plaintext, keySet);
-
-  // ⚠️ Same gotcha as every other path here: the signature covers `enc`'s
-  // ASCII/UTF-8 STRING bytes, never its decoded bytes.
   let sigBytes: Uint8Array;
   try {
     sigBytes = base64Decode(cert.sig);
   } catch {
     throw CheckoutError.invalidBase64();
   }
-  if (!verifyEd25519(new TextEncoder().encode(cert.enc), sigBytes, publicKey)) {
-    throw CheckoutError.cryptoFailure("signature verification failed");
+
+  // ⚠️ Every held key against `enc`'s STRING bytes, before either half of
+  // the payload is decoded — the same order as `verifyMachineFileWithClaims`.
+  const encStringBytes = new TextEncoder().encode(cert.enc);
+  if (findVerifyingKey(keySet, encStringBytes, sigBytes) === undefined) {
+    // No held key signed this: opened only so the `kid` can label it.
+    throw await labelKeySetFailure(keySet, () =>
+      decodeMachineFilePlaintext(cert, encoding, keyMaterial),
+    );
   }
 
+  const plaintext = await decodeMachineFilePlaintext(cert, encoding, keyMaterial);
+  probeKeyIdClaim(plaintext);
   return finishMachineFile(plaintext, now);
 }
 
@@ -534,7 +534,10 @@ async function decodeMachineFilePlaintext(
   try {
     return await decryptAesGcm(nonce, ciphertextAndTag, key);
   } catch {
-    throw CheckoutError.cryptoFailure("decryption failed (wrong key or tampered ciphertext)");
+    throw CheckoutError.cryptoFailure(
+      "decryption failed (wrong key or tampered ciphertext)",
+      "decryption",
+    );
   }
 }
 

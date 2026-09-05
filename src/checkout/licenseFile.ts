@@ -69,7 +69,7 @@ import { verifyEd25519 } from "../crypto/ed25519.js";
 import { decryptAesGcm } from "../crypto/aesGcm.js";
 import { deriveLicenseFileKey } from "../crypto/hkdf.js";
 import { base64Decode } from "../internal/base64.js";
-import { selectSigningKey, type SigningKeySet } from "./keySet.js";
+import { findVerifyingKey, labelKeySetFailure, probeKeyIdClaim, type SigningKeySet } from "./keySet.js";
 import type { License } from "../models/license.js";
 
 const PEM_HEADER = "-----BEGIN LICENSE FILE-----";
@@ -152,6 +152,25 @@ export function parseLicenseFile(pem: string): ParsedLicenseFile {
     throw CheckoutError.invalidJson("expected { enc, sig, alg }");
   }
   return parsed as ParsedLicenseFile;
+}
+
+/**
+ * The `alg` gate. Runs before any key or signature work on every entry point,
+ * single-key and key-set alike, so a v1 file gets the same answer whichever
+ * key it meets. Exactly two strings are legal; there is no v1 fallback — see
+ * the module doc for why.
+ */
+function assertSupportedLicenseFileAlg(alg: string): LicenseFileAlgorithm {
+  if (alg === "base64+ed25519+v2" || alg === "aes-256-gcm+ed25519+v2") return alg;
+  throw CheckoutError.unsupportedAlgorithm(alg);
+}
+
+function decodeSignature(sig: string): Uint8Array {
+  try {
+    return base64Decode(sig);
+  } catch {
+    throw CheckoutError.invalidBase64();
+  }
 }
 
 /**
@@ -246,21 +265,17 @@ export async function verifyLicenseFileWithClaims(
   now?: number,
 ): Promise<VerifiedLicenseFile> {
   const cert = parseLicenseFile(pem);
+  const alg = assertSupportedLicenseFileAlg(cert.alg);
+  const sigBytes = decodeSignature(cert.sig);
 
   // ⚠️ The signature covers `enc`'s ASCII/UTF-8 STRING bytes — the base64
   // STRING itself, never its decoded bytes. See src/crypto/ed25519.ts.
-  let sigBytes: Uint8Array;
-  try {
-    sigBytes = base64Decode(cert.sig);
-  } catch {
-    throw CheckoutError.invalidBase64();
-  }
   const encStringBytes = new TextEncoder().encode(cert.enc);
   if (!verifyEd25519(encStringBytes, sigBytes, ed25519PublicKey)) {
-    throw CheckoutError.cryptoFailure("signature verification failed");
+    throw CheckoutError.cryptoFailure("signature verification failed", "signature");
   }
 
-  const plaintext = await decodeLicenseFilePlaintext(cert, licenseKey);
+  const plaintext = await decodeLicenseFilePlaintext(cert, alg, licenseKey);
   return finishLicenseFile(plaintext, now);
 }
 
@@ -273,13 +288,14 @@ export async function verifyLicenseFileWithClaims(
  * error a forged file produces. Through a key set the two are distinct
  * outcomes:
  *
- * - the `kid` is not in the set → {@link import("../errors.js").SigningKeyError}
- *   of kind `"unknown-key-id"` (or `"no-published-signing-key"` when the file
- *   names the id of an empty key). Fetch the account's key set, or ship an
- *   application update, and try again — do not accuse the file;
- * - the `kid` is in the set but the signature fails →
- *   {@link import("../errors.js").CheckoutError} of kind `"crypto"`, exactly as
- *   before. Refuse the file.
+ * - no held key verifies the signature and the `kid` is not in the set →
+ *   {@link import("../errors.js").SigningKeyError} of kind `"unknown-key-id"`
+ *   (or `"no-published-signing-key"` when the file names the id of an empty
+ *   key). Fetch the account's key set, or ship an application update, and try
+ *   again — do not accuse the file;
+ * - no held key verifies and the `kid` *is* in the set →
+ *   {@link import("../errors.js").CheckoutError} of kind `"crypto"` with
+ *   `reason: "signature"`. Refuse the file.
  *
  * Build the set with
  * {@link import("../client.js").TamgaClient.getSigningKeySet} (one call,
@@ -291,17 +307,14 @@ export async function verifyLicenseFileWithClaims(
  * enforced, both exactly as in {@link verifyLicenseFileWithClaims}. `now`
  * overrides the clock, in Unix seconds.
  *
- * ⚠️ **One ordering difference from {@link verifyLicenseFileWithClaims} is
- * worth knowing.** Selecting a key needs the `kid`, and the `kid` lives inside
- * `enc`, so `enc` is decoded — and, when encrypted, decrypted under the license
- * key — *before* the signature is checked. A file that is malformed or
- * undecryptable therefore reports that rather than a signature failure. Nothing
- * from those bytes is trusted: the only value taken from them before
- * verification is the `kid`, and it can only ever select from keys the caller
- * already supplied, never introduce one. Decryption is itself authenticated —
- * AES-GCM fails closed on a tampered ciphertext — so the bytes that reach the
- * probe on the encrypted path have already been authenticated under a key
- * derived from the license key, just not yet by the signing key.
+ * The order is the same as {@link verifyLicenseFileWithClaims}'s: the `alg`
+ * gate, then every held key against the signature over `enc`'s string bytes,
+ * and only then is `enc` decoded — so nothing attacker-chosen reaches the
+ * decoder, the cipher or the JSON parser on the success path. When no key
+ * verifies, `enc` is decoded — and, when encrypted, decrypted under the
+ * license key — solely to read `meta.kid` and label the failure. Once a
+ * signature has verified, a `"crypto"` failure with `reason: "decryption"`
+ * can only mean the wrong license key.
  */
 export async function verifyLicenseFileWithKeySet(
   pem: string,
@@ -310,37 +323,40 @@ export async function verifyLicenseFileWithKeySet(
   now?: number,
 ): Promise<VerifiedLicenseFile> {
   const cert = parseLicenseFile(pem);
-  const plaintext = await decodeLicenseFilePlaintext(cert, licenseKey);
+  const alg = assertSupportedLicenseFileAlg(cert.alg);
+  const sigBytes = decodeSignature(cert.sig);
 
-  // Throws a typed SigningKeyError for an unknown or empty-account `kid` —
-  // deliberately not the error a forgery produces.
-  const { publicKey } = selectSigningKey(plaintext, keySet);
-
-  // ⚠️ Same gotcha as every other path here: the signature covers `enc`'s
-  // ASCII/UTF-8 STRING bytes, never its decoded bytes.
-  let sigBytes: Uint8Array;
-  try {
-    sigBytes = base64Decode(cert.sig);
-  } catch {
-    throw CheckoutError.invalidBase64();
-  }
-  if (!verifyEd25519(new TextEncoder().encode(cert.enc), sigBytes, publicKey)) {
-    throw CheckoutError.cryptoFailure("signature verification failed");
+  // ⚠️ Every held key against `enc`'s STRING bytes, before a byte of `enc`
+  // is decoded — the same order as the single-key path.
+  const encStringBytes = new TextEncoder().encode(cert.enc);
+  if (findVerifyingKey(keySet, encStringBytes, sigBytes) === undefined) {
+    // No held key signed this. `enc` is opened now, and only now, and only
+    // so the `kid` it names can label the failure.
+    throw await labelKeySetFailure(keySet, () =>
+      decodeLicenseFilePlaintext(cert, alg, licenseKey),
+    );
   }
 
+  const plaintext = await decodeLicenseFilePlaintext(cert, alg, licenseKey);
+  // Every v2 file names its key. A verified payload without a `kid` is
+  // malformed, not merely unlabelled — the same rule as tamga-rust's `finish`.
+  probeKeyIdClaim(plaintext);
   return finishLicenseFile(plaintext, now);
 }
 
 /**
- * Applies the `alg` gate, base64-decodes `enc` and — for the encrypted variant
- * — AES-256-GCM-opens it with the HKDF-derived license-file key.
+ * Base64-decodes `enc` and — for the encrypted variant — AES-256-GCM-opens it
+ * with the HKDF-derived license-file key. `alg` comes from
+ * {@link assertSupportedLicenseFileAlg}, which every caller has already run.
  *
  * Shared by {@link verifyLicenseFileWithClaims} and
- * {@link verifyLicenseFileWithKeySet} so the two cannot drift; they differ only
- * in *when* they call it relative to signature verification.
+ * {@link verifyLicenseFileWithKeySet}; on both it runs after the signature has
+ * verified, with one exception — the key-set failure path opens `enc` solely
+ * to read the `kid` that labels the failure.
  */
 async function decodeLicenseFilePlaintext(
   cert: ParsedLicenseFile,
+  alg: LicenseFileAlgorithm,
   licenseKey: string | undefined,
 ): Promise<Uint8Array> {
   let encBytes: Uint8Array;
@@ -350,26 +366,26 @@ async function decodeLicenseFilePlaintext(
     throw CheckoutError.invalidBase64();
   }
 
-  if (cert.alg === "base64+ed25519+v2") {
+  if (alg === "base64+ed25519+v2") {
     return encBytes;
   }
-  if (cert.alg === "aes-256-gcm+ed25519+v2") {
-    if (licenseKey === undefined) {
-      throw CheckoutError.licenseKeyMissing();
-    }
-    if (encBytes.length < NONCE_LENGTH + TAG_LENGTH) {
-      throw CheckoutError.cryptoFailure("decryption failed (wrong key or tampered ciphertext)");
-    }
-    const key = deriveLicenseFileKey(licenseKey);
-    const nonce = encBytes.subarray(0, NONCE_LENGTH);
-    const ciphertextAndTag = encBytes.subarray(NONCE_LENGTH);
-    try {
-      return await decryptAesGcm(nonce, ciphertextAndTag, key);
-    } catch {
-      throw CheckoutError.cryptoFailure("decryption failed (wrong key or tampered ciphertext)");
-    }
+  if (licenseKey === undefined) {
+    throw CheckoutError.licenseKeyMissing();
   }
-  throw CheckoutError.unsupportedAlgorithm(cert.alg);
+  if (encBytes.length < NONCE_LENGTH + TAG_LENGTH) {
+    throw CheckoutError.cryptoFailure("decryption failed (wrong key or tampered ciphertext)");
+  }
+  const key = deriveLicenseFileKey(licenseKey);
+  const nonce = encBytes.subarray(0, NONCE_LENGTH);
+  const ciphertextAndTag = encBytes.subarray(NONCE_LENGTH);
+  try {
+    return await decryptAesGcm(nonce, ciphertextAndTag, key);
+  } catch {
+    throw CheckoutError.cryptoFailure(
+      "decryption failed (wrong key or tampered ciphertext)",
+      "decryption",
+    );
+  }
 }
 
 /**

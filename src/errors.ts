@@ -611,6 +611,24 @@ export class CheckoutError extends TamgaError {
       | "ttl-out-of-range"
       | "expired"
       | "crypto",
+    /**
+     * For `kind === "crypto"` only — which check failed. Added in 0.4.4 as an
+     * optional property so the `kind` union stays closed for exhaustive
+     * `switch` consumers.
+     *
+     * - `"signature"`: no trusted key verified the signature over `enc`. A
+     *   forgery or an altered file, or (single-key entry points only) the
+     *   wrong public key.
+     * - `"decryption"`: the signature verified and AES-GCM then refused the
+     *   ciphertext. `enc` is inside the signature that just passed, so this
+     *   can only mean the wrong license key (or, for a machine file, the wrong
+     *   fingerprint) — not tampering.
+     *
+     * `undefined` on every other kind, and on the structural `"crypto"`
+     * failures that are neither (a malformed encrypted-payload framing, a
+     * public key of the wrong length, a payload too short to hold a tag).
+     */
+    readonly reason?: "signature" | "decryption",
   ) {
     super(message);
     this.name = "CheckoutError";
@@ -670,8 +688,8 @@ export class CheckoutError extends TamgaError {
     return new CheckoutError(`ttl out of range: ${detail}`, "ttl-out-of-range");
   }
 
-  static cryptoFailure(detail: string): CheckoutError {
-    return new CheckoutError(detail, "crypto");
+  static cryptoFailure(detail: string, reason?: "signature" | "decryption"): CheckoutError {
+    return new CheckoutError(detail, "crypto", reason);
   }
 }
 
@@ -694,7 +712,11 @@ export class CheckoutError extends TamgaError {
  * - `"no-published-signing-key"` → the account published no Ed25519 key at all,
  *   so the server signed with the empty string. No client-side action fixes
  *   this; it is an account-configuration problem. See
- *   {@link import("./crypto/keyId.js").UNBACKFILLED_ACCOUNT_KEY_ID}.
+ *   {@link import("./crypto/keyId.js").UNBACKFILLED_ACCOUNT_KEY_ID}. A
+ *   pre-patch server stamped this on every file of an account whose key was
+ *   never backfilled; the API patch creates a key with every account and
+ *   repairs the public half at startup, so only files issued before it carry
+ *   this `kid`.
  * - `"invalid-key"` → a key handed to
  *   {@link import("./checkout/keySet.js").SigningKeySet.fromPublicKeys} is not
  *   standard base64 of exactly 32 bytes. Raised eagerly, at construction, so a
