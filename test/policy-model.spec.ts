@@ -19,7 +19,13 @@ import {
  * ⚠️ `max_memory` and `max_disk` are absent on purpose. Both exist on the
  * server's `Policy` model (`policies/model.rs:187-188`) and both are enforced
  * during validation (`:302`, `:309`), but the serializer skips straight from
- * `max_cores` to `max_uses`, so no route this SDK calls can populate them.
+ * `max_cores` to `max_processes`, so no route this SDK calls can populate them.
+ *
+ * `max_uses` is also absent — deleted, not made optional, as part of the
+ * entitlement-metering migration (see
+ * `docs/entitlement-metering-migration.md` §1): the global per-license usage
+ * counter it backed no longer exists on the wire, replaced by named
+ * per-entitlement meters.
  */
 const SERIALIZED_POLICY_ATTRIBUTES = [
   "product_id",
@@ -46,7 +52,6 @@ const SERIALIZED_POLICY_ATTRIBUTES = [
   "overage_strategy",
   "max_machines",
   "max_cores",
-  "max_uses",
   "max_processes",
   "max_users",
   "metadata",
@@ -165,7 +170,6 @@ describe("Policy", () => {
         max_machines: null,
         max_cores: null,
         max_processes: null,
-        max_uses: null,
         max_users: null,
         metadata: {},
         created: "2026-01-01T00:00:00Z",
@@ -207,7 +211,6 @@ describe("Policy", () => {
       max_machines: null,
       max_cores: null,
       max_processes: null,
-      max_uses: null,
       max_users: null,
       metadata: {},
       created: "2026-01-01T00:00:00Z",
@@ -217,8 +220,11 @@ describe("Policy", () => {
     // A complete policy attributes object carries every serialized field and
     // nothing else. `max_memory`/`max_disk` are the two that used to be here
     // and are not serialized, so a caller could never have read either.
+    // `max_uses` is a third field this object cannot carry — deleted as part
+    // of the entitlement-metering migration, not merely unserialized.
     expect(Object.keys(attributes).sort()).toEqual([...SERIALIZED_POLICY_ATTRIBUTES].sort());
     expect(SERIALIZED_POLICY_ATTRIBUTES).not.toContain("max_memory");
     expect(SERIALIZED_POLICY_ATTRIBUTES).not.toContain("max_disk");
+    expect(SERIALIZED_POLICY_ATTRIBUTES).not.toContain("max_uses");
   });
 });

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ValidationCode, LicenseValidationResult } from "../src/models/validation.js";
 
-const ALL_24_KNOWN_CODES: ValidationCode[] = [
+const ALL_23_KNOWN_CODES: ValidationCode[] = [
   "VALID",
   "SUSPENDED",
   "EXPIRED",
@@ -15,7 +15,6 @@ const ALL_24_KNOWN_CODES: ValidationCode[] = [
   "TOO_MUCH_MEMORY",
   "TOO_MUCH_DISK",
   "TOO_MANY_PROCESSES",
-  "TOO_MANY_USES",
   "NOT_FOUND",
   "BANNED",
   "ENTITLEMENTS_MISSING",
@@ -29,8 +28,12 @@ const ALL_24_KNOWN_CODES: ValidationCode[] = [
 ];
 
 describe("ValidationCode", () => {
-  it("models all 24 documented wire values", () => {
-    expect(ALL_24_KNOWN_CODES).toHaveLength(24);
+  it("models all 23 documented wire values", () => {
+    expect(ALL_23_KNOWN_CODES).toHaveLength(23);
+  });
+
+  it("no longer models the retired TOO_MANY_USES code (entitlement-metering migration)", () => {
+    expect(ALL_23_KNOWN_CODES).not.toContain("TOO_MANY_USES");
   });
 
   it("accepts an arbitrary unknown string via the open-union escape hatch", () => {

@@ -1775,6 +1775,71 @@ export class TamgaClient {
     return entitlements.some((e) => e.attributes.code === code);
   }
 
+  /**
+   * `POST /licenses/{license_id}/entitlements/{entitlement_id}/actions/increment`
+   * — bumps a `kind: "meter"` entitlement's `current_value` by `increment`
+   * (default `1`, clamped to a minimum of `1` server-side — a `0` or
+   * negative value is raised to `1`, not rejected). Returns the full,
+   * fresh {@link Entitlement} resource, so the caller sees the updated
+   * `current_value` without a second round trip.
+   *
+   * ⚠️ **Requires the entitlement to be directly attached to this
+   * license.** An entitlement only inherited via the license's policy has
+   * no `license_entitlements` row to increment and this call `404`s —
+   * attach it directly first.
+   *
+   * Raises {@link import("./errors.js").MeterLimitExceededError} (`422
+   * METER_LIMIT_EXCEEDED`) when `current_value + increment` would exceed
+   * `max_value`.
+   */
+  async incrementEntitlementUsage(
+    licenseId: string,
+    entitlementId: string,
+    increment?: number,
+  ): Promise<Entitlement> {
+    const { data } = await sendJsonApi<Entitlement>(this.transport, {
+      method: "POST",
+      path: `/licenses/${licenseId}/entitlements/${entitlementId}/actions/increment`,
+      body: increment !== undefined ? { increment } : undefined,
+    });
+    return data;
+  }
+
+  /**
+   * `POST /licenses/{license_id}/entitlements/{entitlement_id}/actions/decrement`
+   * — reduces a `kind: "meter"` entitlement's `current_value` by
+   * `decrement` (default `1`, clamped to a minimum of `1` server-side).
+   * Floors at `0` — it never goes negative. Same directly-attached
+   * requirement and full-resource return shape as {@link
+   * incrementEntitlementUsage}.
+   */
+  async decrementEntitlementUsage(
+    licenseId: string,
+    entitlementId: string,
+    decrement?: number,
+  ): Promise<Entitlement> {
+    const { data } = await sendJsonApi<Entitlement>(this.transport, {
+      method: "POST",
+      path: `/licenses/${licenseId}/entitlements/${entitlementId}/actions/decrement`,
+      body: decrement !== undefined ? { decrement } : undefined,
+    });
+    return data;
+  }
+
+  /**
+   * `POST /licenses/{license_id}/entitlements/{entitlement_id}/actions/reset`
+   * — no body, sets `current_value` back to `0`. Same directly-attached
+   * requirement and full-resource return shape as {@link
+   * incrementEntitlementUsage}.
+   */
+  async resetEntitlementUsage(licenseId: string, entitlementId: string): Promise<Entitlement> {
+    const { data } = await sendJsonApi<Entitlement>(this.transport, {
+      method: "POST",
+      path: `/licenses/${licenseId}/entitlements/${entitlementId}/actions/reset`,
+    });
+    return data;
+  }
+
   // ---------------------------------------------------------------------
   // Artifacts
   // ---------------------------------------------------------------------
