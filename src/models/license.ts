@@ -34,8 +34,6 @@ export interface LicenseAttributes {
   suspended: boolean;
   /** Whether checkout/download of this license's key is protected. */
   protected: boolean;
-  /** Current use count, compared against `max_uses` (strict `>=`, regardless of overage strategy). */
-  uses: number;
   /**
    * Signing scheme for checkout files — see {@link
    * import("./policy.js").LicenseScheme}. `null` means a legacy plain/unsigned key.
@@ -49,8 +47,6 @@ export interface LicenseAttributes {
   floating: boolean;
   /** Per-license override of `policy.max_machines`, if set. */
   max_machines: number | null;
-  /** Per-license override of `policy.max_uses`, if set. */
-  max_uses: number | null;
   /** Per-license override of `policy.max_users`, if set. */
   max_users: number | null;
   /** Timestamp of the last successful validation, unless suppressed via `skip_touch`. */
@@ -147,6 +143,15 @@ export interface EntitlementAttributes {
   /** The stable, developer-facing identifier. `hasEntitlement` matches on this, never `name`. */
   code: string;
   /**
+   * `"flag"` (a boolean grant — the only kind that existed before entitlement
+   * metering) or `"meter"` (a named, per-license counter with an independent
+   * cap). Always present on every response — not optional/nullable — though a
+   * create request may omit it, in which case the server defaults it to
+   * `"flag"`. There is no update path for this field: an entitlement's kind is
+   * fixed at creation.
+   */
+  kind: "flag" | "meter";
+  /**
    * `true` when the license holds this entitlement through its **policy**
    * rather than directly.
    *
@@ -162,6 +167,31 @@ export interface EntitlementAttributes {
    * release-scoped entitlement responses omit it, hence optional.
    */
   inherited?: boolean;
+  /**
+   * The effective cap for a `kind: "meter"` entitlement — the license's own
+   * override if it has one, else the policy's default, else `null` =
+   * unlimited (the same "nullable = unlimited" convention every other
+   * `max_*` field on `licenses`/`policies` uses). Meaningless, but present,
+   * for `kind: "flag"`.
+   *
+   * Emitted by both the license-scoped and policy-scoped entitlement
+   * listings, hence optional here rather than on a third split type — the
+   * plain (account-/release-scoped) listing omits it.
+   */
+  max_value?: number | null;
+  /**
+   * The running count for a `kind: "meter"` entitlement, `0` if never
+   * incremented. **Only emitted by the license-scoped listing** — the
+   * policy-scoped listing carries `max_value` but never this field, since
+   * usage is never pooled at the policy level.
+   *
+   * ⚠️ `0` does not necessarily mean "never used" — it also means "this
+   * entitlement is only inherited from the license's policy and has never
+   * been directly attached to this license", because only a direct
+   * `license_entitlements` row carries a counter at all. Check {@link
+   * inherited} to tell the two apart if that distinction matters.
+   */
+  current_value?: number;
   /** Arbitrary caller-set metadata. */
   metadata: Record<string, unknown>;
   /** Creation timestamp. */

@@ -16,6 +16,7 @@ import {
   LicenseKeyMissingError,
   SchemeNotSupportedError,
   DatasetInvalidError,
+  MeterLimitExceededError,
   SigningKeyMissingError,
   SecretKeyMissingError,
   ApiError,
@@ -182,6 +183,28 @@ describe("errorFromApiError", () => {
       meta: { machineId: 42 },
     });
     expect((notAString as FingerprintTakenError).existingMachineId).toBeUndefined();
+  });
+
+  it("maps METER_LIMIT_EXCEEDED to MeterLimitExceededError, exposing entitlementId from meta.entitlement_id", () => {
+    const named = errorFromApiError({
+      status: 422,
+      code: "METER_LIMIT_EXCEEDED",
+      detail: "current_value + increment would exceed max_value",
+      meta: { entitlement_id: "e-1" },
+    }) as MeterLimitExceededError;
+    expect(named).toBeInstanceOf(MeterLimitExceededError);
+    expect(named.entitlementId).toBe("e-1");
+
+    const bare = errorFromApiError({ status: 422, code: "METER_LIMIT_EXCEEDED", detail: "elsewhere" });
+    expect((bare as MeterLimitExceededError).entitlementId).toBeUndefined();
+
+    const notAString = errorFromApiError({
+      status: 422,
+      code: "METER_LIMIT_EXCEEDED",
+      detail: "x",
+      meta: { entitlement_id: 42 },
+    });
+    expect((notAString as MeterLimitExceededError).entitlementId).toBeUndefined();
   });
 });
 

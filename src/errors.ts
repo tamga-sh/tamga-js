@@ -368,6 +368,31 @@ export class DiskLimitExceededError extends TamgaApiErrorException {
 }
 
 /**
+ * `422 METER_LIMIT_EXCEEDED` — a `kind: "meter"` entitlement's
+ * `increment`/`decrement` action was refused because `current_value +
+ * increment` would exceed `max_value`. Replaces the retired
+ * `TOO_MANY_USES` {@link import("./models/validation.js").ValidationCode}
+ * from the old global per-license usage counter.
+ *
+ * Carries `meta.entitlement_id` — the entitlement that hit its cap — so a
+ * caller juggling several meters on one license can tell which one without
+ * re-parsing the request. See {@link entitlementId}.
+ */
+export class MeterLimitExceededError extends TamgaApiErrorException {
+  static readonly CODE = "METER_LIMIT_EXCEEDED";
+  constructor(apiError: TamgaApiError) {
+    super(apiError, `meter limit exceeded: ${apiError.detail}`);
+    this.name = "MeterLimitExceededError";
+  }
+
+  /** The id of the entitlement whose meter is at capacity (`meta.entitlement_id`), when the server named it. */
+  get entitlementId(): string | undefined {
+    const entitlementId = this.apiError.meta?.entitlement_id;
+    return typeof entitlementId === "string" ? entitlementId : undefined;
+  }
+}
+
+/**
  * `422 TOO_MANY_PROCESSES` — `POST /processes` was refused because the
  * license is already at `policy.max_processes`. Spawn-time enforcement;
  * retrying the same spawn keeps returning this code.
@@ -518,6 +543,8 @@ export function errorFromApiError(apiError: TamgaApiError): TamgaApiErrorExcepti
       return new MemoryLimitExceededError(apiError);
     case DiskLimitExceededError.CODE:
       return new DiskLimitExceededError(apiError);
+    case MeterLimitExceededError.CODE:
+      return new MeterLimitExceededError(apiError);
     case TooManyProcessesError.CODE:
       return new TooManyProcessesError(apiError);
     case LicenseSuspendedError.CODE:

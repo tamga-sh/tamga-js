@@ -38,4 +38,15 @@ describe("TamgaClient.hasEntitlement", () => {
     const [url] = lastCall(fetchMock);
     expect(url.searchParams.get("limit")).toBe("100");
   });
+
+  it("matches by code regardless of kind — flag and meter entitlements are both eligible", async () => {
+    mockJsonApiResponse([
+      {
+        id: "e-1",
+        type: "entitlements",
+        attributes: { name: "API Requests", code: "REQUESTS", kind: "meter", max_value: 100, current_value: 5 },
+      },
+    ]);
+    expect(await client().hasEntitlement("lic-1", "REQUESTS")).toBe(true);
+  });
 });

@@ -37,8 +37,7 @@ export type LicenseScheme =
  * import("./validation.js").ValidationCode}.
  *
  * Multiplies the relevant limit before comparing; applies to
- * machines/cores/memory/disk/processes — **not** to `uses` (server always
- * enforces strict `count >= max_uses` for uses, regardless of strategy).
+ * machines/cores/memory/disk/processes.
  */
 export type OverageStrategy =
   | "NO_OVERAGE"
@@ -246,8 +245,8 @@ export interface Policy {
  * ⚠️ **`max_memory` and `max_disk` are deliberately not modeled.** Both exist
  * on the server's `Policy` model and both are enforced during validation
  * (`policies/model.rs:187-188`, `:302`, `:309`), but the serializer never
- * emits them — it emits `max_machines`, `max_cores`, `max_uses`,
- * `max_processes` and `max_users` and stops. They are settable through the
+ * emits them — it emits `max_machines`, `max_cores`, `max_processes` and
+ * `max_users` and stops. They are settable through the
  * policy create/update request bodies, which this SDK does not expose, and
  * unreadable through every route it does. So the two limits are observable
  * only as `TOO_MUCH_MEMORY`/`TOO_MUCH_DISK` on a failed validation, or as
@@ -357,8 +356,6 @@ export interface PolicyAttributes {
   max_cores: number | null;
   /** Total process limit across machines, if set. */
   max_processes: number | null;
-  /** Use-count limit, if set (compared with strict `>=`, ignoring `overage_strategy`). */
-  max_uses: number | null;
   /** Associated-user limit, if set. */
   max_users: number | null;
   /** Arbitrary caller-set metadata. */

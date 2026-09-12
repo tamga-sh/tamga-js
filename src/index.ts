@@ -120,6 +120,7 @@ export {
   CoreLimitExceededError,
   MemoryLimitExceededError,
   DiskLimitExceededError,
+  MeterLimitExceededError,
   TooManyProcessesError,
   LicenseSuspendedError,
   LicenseExpiredError,

@@ -94,6 +94,9 @@ method sends whatever `auth` transport was configured.
 | `listEntitlements(licenseId, { limit?, after? })` | `GET /licenses/{id}/entitlements` |
 | `getEntitlement(licenseId, entitlementId)` | `GET /licenses/{id}/entitlements/{entitlementId}` |
 | `hasEntitlement(licenseId, code, limit?)` | convenience wrapper around `listEntitlements` |
+| `incrementEntitlementUsage(licenseId, entitlementId, increment?)` | `POST /licenses/{id}/entitlements/{entitlementId}/actions/increment` |
+| `decrementEntitlementUsage(licenseId, entitlementId, decrement?)` | `POST /licenses/{id}/entitlements/{entitlementId}/actions/decrement` |
+| `resetEntitlementUsage(licenseId, entitlementId)` | `POST /licenses/{id}/entitlements/{entitlementId}/actions/reset` |
 | `checkForUpgrade(opts)` | `GET /releases/actions/upgrade` |
 | `listReleaseArtifacts(releaseId, { limit?, after? })` | `GET /releases/{id}/artifacts` |
 | `getArtifact(artifactId)` | `GET /artifacts/{id}` |
@@ -110,6 +113,10 @@ Several of these need a caveat before you wire them in:
   use `getLicensePolicy` instead, which needs only `license.read`. See
   **Auth transports**.
 - `listEntitlements` ignores `after`: that route is not paginable server-side.
+- `incrementEntitlementUsage` / `decrementEntitlementUsage` / `resetEntitlementUsage`
+  only work on an entitlement **directly attached** to the license — one only
+  inherited through the license's policy has no counter row and these `404`.
+  See **Entitlements and meters** below.
 - **`listMachines` is offset-paginated and every other list here is not.** It
   takes `page` / `size` and returns `{ items, page: { number, size, total,
   totalPages } }`; `listComponents` and `listMachineProcesses` take
@@ -126,13 +133,57 @@ Several of these need a caveat before you wire them in:
   stale process row. See **Known gaps**.
 
 Errors are typed subclasses of `TamgaError` (`NotFoundError`,
-`FingerprintTakenError`, `MachineLimitExceededError`,
+`FingerprintTakenError`, `MachineLimitExceededError`, `MeterLimitExceededError`,
 `LicenseNotAllowedError`, `CheckInNotRequiredError`, …). Match on the stable
 `.code`, never on `.message` / `.detail`.
 
 More runnable examples — scoped validation, machine heartbeats, offline `.lic` /
 `.mach` verification, offline proof tokens, Deno and browser quickstarts — live
 in [`docs/examples/`](./docs/examples).
+
+## Entitlements and meters
+
+Every entitlement is either a `kind: "flag"` (a plain boolean grant —
+the only kind that existed before entitlement metering) or a `kind: "meter"` —
+a named, per-license counter with its own cap. `kind` is always present on
+every response; a license-scoped listing also carries `max_value` (the
+effective cap — `null` means unlimited) and `current_value` (the running
+count, `0` if never incremented or if this entitlement is only inherited from
+the license's policy and has never been directly attached).
+
+```ts
+const [entitlement] = await client.listEntitlements(licenseId);
+
+if (entitlement.attributes.kind === "meter") {
+  console.log(`${entitlement.attributes.current_value}/${entitlement.attributes.max_value ?? "∞"}`);
+}
+
+// Bump a directly-attached meter's usage by 1 (or pass a custom amount) and
+// read back the fresh current_value from the same response.
+const updated = await client.incrementEntitlementUsage(licenseId, entitlement.id);
+console.log(updated.attributes.current_value);
+
+// Give some usage back.
+await client.decrementEntitlementUsage(licenseId, entitlement.id, 3);
+
+// Start a billing period over.
+await client.resetEntitlementUsage(licenseId, entitlement.id);
+```
+
+```ts
+import { MeterLimitExceededError } from "@tamga/sdk";
+
+try {
+  await client.incrementEntitlementUsage(licenseId, entitlement.id, 100);
+} catch (error) {
+  if (error instanceof MeterLimitExceededError) {
+    // error.entitlementId names which meter hit its cap (meta.entitlement_id).
+    console.log(`entitlement ${error.entitlementId} is at its limit`);
+  } else {
+    throw error;
+  }
+}
+```
 
 ## Auth transports
 

@@ -1,9 +1,9 @@
 /**
  * License validation result types.
  *
- * `ValidationCode` models all 24 wire values documented in the Tamga API
+ * `ValidationCode` models all 23 wire values documented in the Tamga API
  * protocol specification §2, evaluated server-side in priority order on the
- * by-ID endpoint. Nineteen are reachable; the other five (`NOT_FOUND`,
+ * by-ID endpoint. Eighteen are reachable; the other five (`NOT_FOUND`,
  * `BANNED`, `COMPONENTS_SCOPE_MISMATCH`, `CHECKSUM_SCOPE_MISMATCH`,
  * `VERSION_SCOPE_MISMATCH`) are declared in the server's enum but never
  * emitted (see that specification's Known Server-Side Gaps #4). The
@@ -23,7 +23,7 @@
  * (so an unrecognized code from a future server version doesn't force a
  * runtime throw or `as` cast) while still giving autocomplete/narrowing for
  * the known literals. Do not replace it with a bare `string` — that would
- * lose the literal-union autocomplete for the 24 known codes.
+ * lose the literal-union autocomplete for the 23 known codes.
  */
 export type ValidationCode =
   // Reachable today.
@@ -40,7 +40,6 @@ export type ValidationCode =
   | "TOO_MUCH_MEMORY"
   | "TOO_MUCH_DISK"
   | "TOO_MANY_PROCESSES"
-  | "TOO_MANY_USES"
   // Also reachable: the server enforces `scope.entitlements` and
   // `scope.fingerprint`, so a scoped `validateById` can fail with either of
   // these — see `LicenseScope` in `./license.ts`.
